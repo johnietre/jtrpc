@@ -1,0 +1,12 @@
+package "";
+
+option "yes";
+
+struct Struct {
+  int_1bit: i1;
+  int_7bit: i7;
+  test_struct: Struct1;
+  test_struct2: testpkg.Struct2;
+}
+
+fn get_thing([Struct]): [Struct];
