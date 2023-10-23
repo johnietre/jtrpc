@@ -69,6 +69,9 @@ struct Struct {
 ```
 This way, it can be encoded in 128-bits more easily and without values having to cross word (64-bit) boundaries.
 
+# !!!NOTE - THE FOLLOWING ISN'T CURRENTLY BEING USED!!!
+- THE FOLLOWING ISN'T BEING USED, SEE SPEC.V2.md FOR CURRENT NETWORK SPEC!
+
 # JtRPC
 
 ## Request
