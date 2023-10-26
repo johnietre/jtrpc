@@ -1,0 +1,7 @@
+name = "JtRPC"
+uuid = "7ed7731f-dbb1-4bb2-9fd2-a4faf06a8af1"
+authors = ["johnietre <johnietrebus@gmail.com>"]
+version = "0.1.0"
+
+[deps]
+Sockets = "6462fe0b-24de-5631-8697-dd941f90decc"

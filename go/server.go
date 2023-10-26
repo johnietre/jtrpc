@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"sync"
 	"time"
 
@@ -20,6 +21,8 @@ const (
 	// DefaultMaxStreamBodyLen is the default max body length for stream
 	// messages.
 	DefaultMaxStreamBodyLen int64 = 1 << 16
+	// DefaultConnectTimeout is the default connect timeout.
+	DefaultConnectTimeout = time.Second * 10
 )
 
 var (
@@ -28,6 +31,8 @@ var (
 		0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x05,
 		'j', 't', 'r', 'p', 'c',
 	}
+
+	noopHandler = Handler(HandlerFunc(func(*Request, *Response) {}))
 )
 
 // Server is a server.
@@ -48,7 +53,8 @@ type Server struct {
 	// uses DefaultMaxBodyLen. If < 0, the max length is 1<<63 - 1.
 	MaxStreamBodyLen int64
 
-	// ConnectTimeout is the max time for establishing the connection.
+	// ConnectTimeout is the max time for establishing the connection. If it is
+	// non-positive, there is no timeout.
 	ConnectTimeout time.Duration
 
 	bufPool sync.Pool
@@ -61,6 +67,7 @@ func NewServer(addr string) *Server {
 		Mux:              NewMapMux(),
 		MaxBodyLen:       DefaultMaxBodyLen,
 		MaxStreamBodyLen: DefaultMaxStreamBodyLen,
+		ConnectTimeout:   DefaultConnectTimeout,
 		Logger:           log.Default(),
 		bufPool: sync.Pool{
 			New: func() any {
@@ -71,23 +78,32 @@ func NewServer(addr string) *Server {
 }
 
 // Handle adds a handler to the Mux.
-func (s *Server) Handle(path string, h Handler) {
-	s.Mux.Handle(path, h)
+func (s *Server) Handle(path string, h Handler, ms ...Middleware) {
+	s.Mux.Handle(path, h, ms...)
 }
 
 // HandleStream adds a stream handler to the Mux.
-func (s *Server) HandleStream(path string, h StreamHandler) {
-	s.Mux.HandleStream(path, h)
+func (s *Server) HandleStream(path string, h StreamHandler, ms ...Middleware) {
+	s.Mux.HandleStream(path, h, ms...)
+}
+
+// Middleware adds middleware to the Mux.
+func (s *Server) Middleware(ms ...Middleware) {
+	s.Mux.Middleware(ms...)
 }
 
 // HandleFunc adds a HandlerFunc to the Mux.
-func (s *Server) HandleFunc(path string, h func(*Request, *Response)) {
-	s.Mux.Handle(path, HandlerFunc(h))
+func (s *Server) HandleFunc(
+	path string, h func(*Request, *Response), ms ...Middleware,
+) {
+	s.Mux.Handle(path, HandlerFunc(h), ms...)
 }
 
 // HandleStreamFunc adds a StreamHandlerFunc to the Mux.
-func (s *Server) HandleStreamFunc(path string, h func(*Stream)) {
-	s.Mux.HandleStream(path, StreamHandlerFunc(h))
+func (s *Server) HandleStreamFunc(
+	path string, h func(*Stream), ms ...Middleware,
+) {
+	s.Mux.HandleStream(path, StreamHandlerFunc(h), ms...)
 }
 
 // Run runs the server.
@@ -221,15 +237,30 @@ func (s *Server) handleStreamMsg(
 	msgLen := int64(get8(buf.Next(8)))
 	if hasCloseFlag(flags) {
 		var err error
+		msg := Message{reqId: stream.req.id, flags: flags}
 		if msgLen != 0 {
-			// TODO?
-			// TODO: Handle error
-			_, err = io.CopyN(io.Discard, conn, msgLen)
+			// Still check message len
+			if msgLen > s.MaxStreamBodyLen {
+				errMsg := Message{
+					reqId: stream.req.id,
+					flags: FlagStreamMsg | MsgFlagTooLarge,
+				}
+				errMsg.SetBodyBytes(append8(nil, uint64(s.MaxStreamBodyLen)))
+				stream.Send(errMsg)
+				_, err = io.CopyN(io.Discard, conn, msgLen)
+			} else {
+				if _, err := io.CopyN(buf, conn, int64(msgLen)); err != nil {
+					// TODO: Close stream anyway (right now, returning an error should
+					// close the conn, therefore, closing the all streams)?
+					return err
+				}
+				msg.Body = bytes.NewBuffer(utils.CloneSlice(buf.Bytes()))
+				buf.Reset()
+				s.bufPool.Put(buf)
+			}
 		}
+		stream.closeWithMsgRecvd(msg)
 		// TODO: Handle error
-		if e := stream.close(false); e != nil && err == nil {
-			err = e
-		}
 		return err
 	}
 	// Check the message body length
@@ -240,7 +271,7 @@ func (s *Server) handleStreamMsg(
 		}
 		msg.SetBodyBytes(append8(nil, uint64(s.MaxStreamBodyLen)))
 		stream.Send(msg)
-		_, err := io.CopyN(buf, conn, msgLen)
+		_, err := io.CopyN(io.Discard, conn, msgLen)
 		return err
 	}
 	if _, err := io.CopyN(buf, conn, int64(msgLen)); err != nil {
@@ -281,13 +312,6 @@ func (s *Server) handleReq(
 	path := string(buf.Next(pathLen))
 	// Check path
 	if hasStream {
-		// Make sure the request is good
-		if bodyLen != 0 {
-			// TODO: Handle error
-			writeRespMsg(lw, id, StatusBadRequest, "body length should be 0")
-			_, err := io.CopyN(io.Discard, conn, int64(headersLen+bodyLen))
-			return err
-		}
 		// Check for stream handler
 		if streamHandler := s.Mux.GetStreamHandler(path); streamHandler != nil {
 			// Get headers
@@ -295,21 +319,48 @@ func (s *Server) handleReq(
 				return err
 			}
 			headerBytes := utils.CloneSlice(buf.Next(headersLen))
-			req := newRequest(id, remoteAddr, flags, path, headerBytes)
-			// Write the response
-			_, err := writeResp(lw, id, StatusOK)
-			// Handle stream
-			if err == nil {
-				stream := newStream(lw, conn, req)
-				conn.streams.Apply(func(mp *map[uint64]*Stream) {
-					(*mp)[stream.req.id] = stream
-				})
-				go func() {
-					streamHandler.HandleStream(stream)
-				}()
+			// Get body
+			if _, err := io.CopyN(buf, conn, int64(bodyLen)); err != nil {
+				return err
 			}
-			// TODO: Handle error
-			return err
+			// Call the handler
+			req := newRequest(id, remoteAddr, flags, path, headerBytes)
+			req.Body = buf
+			conn.reqs.Apply(func(mp *map[uint64]*Request) {
+				(*mp)[req.id] = req
+			})
+			resp := &Response{reqId: id, flags: flags}
+			handler := noopHandler
+			// Add middlewares
+			if mw := s.Mux.GetMiddleware(); mw != nil {
+				// Pass a handler that does nothing just so that middleware can be run
+				handler = mw(handler)
+			}
+			if mw := s.Mux.GetStreamMiddleware(path); mw != nil {
+				handler = mw(handler)
+			}
+			// Run the and add the stream if necessary
+			go func() {
+				handler.Handle(req, resp)
+				conn.reqs.Apply(func(mp *map[uint64]*Request) {
+					delete(*mp, req.id)
+				})
+				// Write the response
+				// TODO: Handle error
+				_, err := resp.WriteTo(lw.LockWriter())
+				lw.Unlock()
+				req.Body.Reset()
+				s.bufPool.Put(req.Body)
+				// Handle stream
+				if resp.StatusCode == StatusOK && err == nil {
+					stream := newStream(lw, conn, req)
+					conn.streams.Apply(func(mp *map[uint64]*Stream) {
+						(*mp)[stream.req.id] = stream
+					})
+					streamHandler.HandleStream(stream)
+				}
+			}()
+			return nil
 		}
 		// Check if it is a regular handler
 		if handler := s.Mux.GetHandler(path); handler != nil {
@@ -347,6 +398,10 @@ func (s *Server) handleReq(
 		(*mp)[req.id] = req
 	})
 	resp := &Response{reqId: id}
+	// Pass to middleware and get new handler
+	if mw := s.Mux.GetMiddleware(); mw != nil {
+		handler = mw(handler)
+	}
 	go func() {
 		handler.Handle(req, resp)
 		conn.reqs.Apply(func(mp *map[uint64]*Request) {
@@ -360,6 +415,11 @@ func (s *Server) handleReq(
 		s.bufPool.Put(req.Body)
 	}()
 	return nil
+}
+
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// TODO
+	http.Error(w, "Not implemented", http.StatusNotImplemented)
 }
 
 func setReadTimeout(conn net.Conn, dur time.Duration) {

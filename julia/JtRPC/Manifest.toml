@@ -1,0 +1,8 @@
+# This file is machine-generated - editing it directly is not advised
+
+julia_version = "1.8.5"
+manifest_format = "2.0"
+project_hash = "31b3374e52017e9887cea642d78f05d6d99987f1"
+
+[[deps.Sockets]]
+uuid = "6462fe0b-24de-5631-8697-dd941f90decc"

@@ -2,6 +2,7 @@ package jtrpc
 
 import (
 	"bytes"
+	"context"
 	"io"
 
 	utils "github.com/johnietre/utils/go"
@@ -118,7 +119,8 @@ func (h *Headers) Map() map[string]string {
 
 // Request is a request received.
 type Request struct {
-	id uint64
+	id  uint64
+	ctx context.Context
 	// RemoteAddr is the remote address of the client.
 	RemoteAddr string
 	// Flags are the flags that were sent.
@@ -141,6 +143,25 @@ func newRequest(
 		Path:       path,
 		Headers:    newHeaders(headerBytes),
 	}
+}
+
+func (r *Request) setContext(ctx context.Context) *Request {
+	r.ctx = ctx
+	return r
+}
+
+// Context returns the context associated with the request.
+func (r *Request) Context() context.Context {
+	return r.ctx
+}
+
+// WithContext returns a shallow-copied request with the given context. Panics
+// if the passed context is nil.
+func (r *Request) WithContext(ctx context.Context) *Request {
+	r2 := new(Request)
+	*r2 = *r
+	r2.ctx = ctx
+	return r2
 }
 
 func hasStreamFlag(flags byte) bool {
@@ -198,6 +219,9 @@ type Response struct {
 	Headers map[string]string
 	body    io.ReadCloser
 	bodyLen uint64
+	// Request is the request that is associated with this response. As of right
+	// now, not set for Server request/responses.
+	Request *Request
 }
 
 // SetBodyString sets the body to the specified string.

@@ -92,6 +92,14 @@ Message(close=false) = Message(close ? MSG_FLAG_CLOSE : 0, [])
 Message(body::Bytes) = Message(0, body)
 Message(body::String) = Message(0, Bytes(body))
 
+struct StreamClosedError <: Exception
+    message::Union{Message, Nothing}
+    client_closed::Bool
+end
+
+StreamClosedError(msg::Union{Message, Nothing}) = StreamClosedError(msg, false)
+StreamClosedError(client_closed::Bool) = StreamClosedError(nothing, client_closed)
+
 abstract type AbstractClient end
 
 mutable struct Stream
@@ -99,16 +107,35 @@ mutable struct Stream
     req::Request
     chan::Channel{Message}
     @atomic isclosed::Bool
+    @atomic close_err::Union{StreamClosedError, Nothing}
 end
 
-function recv!(stream::Stream)::Union{Message, Nothing}
-    isclosed(stream) && return nothing
-    try; take!(stream.chan); catch; end
+function recv!(stream::Stream; throw_error::Bool=false)::Union{Message, Nothing}
+    if isclosed(stream)
+        throw_error && return nothing
+        err = @atomic stream.close_err
+        throw(err === nothing ? StreamClosedError() : err)
+    end
+    try
+        take!(stream.chan)
+    catch
+        throw_error && rethrow()
+    end
 end
 
-function send!(stream::Stream, msg::Message)::Bool
-    isclosed(stream) && return false
-    try; send_to_stream!(stream, msg); true; catch; false; end
+function send!(stream::Stream, msg::Message; throw_error::Bool=false)::Bool
+    if isclosed(stream)
+        throw_error && return false
+        err = @atomic stream.close_err
+        throw(err === nothing ? StreamClosedError() : err)
+    end
+    try
+        send_to_stream!(stream, msg)
+        true
+    catch
+        throw_error && rethrow()
+        false
+    end
 end
 
 function send_to_stream!(stream::Stream, msg::Message)
@@ -127,13 +154,33 @@ function close!(stream::Stream)
     close_stream!(stream, true)
 end
 
-function close_stream!(stream::Stream, send_close)
+function close!(stream::Stream, msg::Message)
+    close_stream!(stream, true, msg)
+end
+
+function close_stream!(
+    stream::Stream, send_close::Bool, msg::{Union{Message, Nothing}}=nothing;
+    close_msg::Union{Message, Nothing},
+)
     (@atomicswap stream.isclosed = true) && return
+    if close_msg === nothing
+        @atomic stream.close_err = StreamClosedError(true)
+    else
+        @atomic stream.close_err = StreamClosedError(close_msg)
+    end
     client = stream.client
     lock(() -> delete!(client.streams, stream.req.id), client.streams_lock)
     close(stream.chan)
     !send_close && return
-    try; send_to_stream!(stream, Mesage(MSG_FLAG_CLOSE, [])); catch; end
+    try
+        if msg === nothing
+            msg = Message(MSG_FLAG_CLOSE, [])
+        else
+            msg.flags |= MSG_FLAG_CLOSE
+        end
+        send_to_stream!(stream, msg)
+    catch
+    end
 end
 
 function isclosed(stream::Stream)::Bool
@@ -205,6 +252,9 @@ mutable struct Client <: AbstractClient
     conn_write_lock::ReentrantLock
 
     @atomic isclosed::Bool
+    # This is error is set when the client has failed in reading from/listening
+    # to the server. The client is closed when this occurs.
+    @atomic listen_err::Union{Exception, Nothing}
 
     req_counter::Threads.Atomic{UInt64}
     reqs::Dict{UInt64, ReqTup}
@@ -217,7 +267,6 @@ const INITIAL_BYTES = Vector{Byte}([
     0x00, 0x00, 0x00, 0x00, 0x01, 0x05,
     'j', 't', 'r', 'p', 'c',
 ])
-
 const INITIAL_BYTES_VER = Vector{Byte}([INITIAL_BYTES; 0x00; 0x01])
 
 struct ConnectException{T} <: Exception
@@ -242,7 +291,7 @@ function dial(host::Sockets.IPAddr, port::UInt16)::Client
     client = Client(
         (host, port), conn, ReentrantLock(),
         false,
-        Threads.Atomic{UInt64}(0),
+        Threads.Atomic{UInt64}(0), nothing,
         Dict{UInt64, Request}(), ReentrantLock(),
         Dict{UInt64, Stream}(), ReentrantLock(),
     )
@@ -285,8 +334,11 @@ function listen_conn!(client::Client)
                 end
             end
         end
-    catch e; println("Error: $e"); end
+    catch e
+        @atomic client.listen_err = e
+    end
     #catch; rethrow(); end
+    #catch; end
     close!(client)
 end
 
@@ -329,12 +381,13 @@ function handle_stream_msg!(client::Client, stream::Stream, buf::Bytes)
     ml = from_le_bytes8(buf)
     mb = read(client.conn, ml)
     if flags & MSG_FLAG_CLOSE != 0
-        close_stream!(stream, false)
+        close_stream!(stream, false; close_msg=Message(flags, mb))
         return
     end
     try
         put!(stream.chan, Message(flags, mb))
     catch
+        # Stream (channel) already closed by client
         close_stream!(stream, true)
     end
     return

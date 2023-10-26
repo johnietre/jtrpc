@@ -7,6 +7,7 @@ import (
 	"io"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	utils "github.com/johnietre/utils/go"
 )
@@ -21,8 +22,8 @@ const (
 )
 
 var (
-	// ErrStreamClosed means the stream has been closed.
-	ErrStreamClosed = fmt.Errorf("stream closed")
+	// ErrTimedOut means an operation timed out.
+	ErrTimedOut = fmt.Errorf("timed out")
 )
 
 // Stream represents a stream.
@@ -33,20 +34,25 @@ type Stream struct {
 	msgChan      chan Message
 	msgBuffer    *list.List
 	msgBufferMtx sync.Mutex
+	deadline     *utils.AValue[time.Time]
 	isClosed     atomic.Bool
+	closeErr     *atomic.Pointer[StreamClosedError]
 }
 
 func newStream(
 	lw *utils.LockedWriter, conn *serverConn, req *Request,
 ) *Stream {
-	return &Stream{
+	stream := &Stream{
 		lw:   lw,
 		conn: conn,
 		req:  req,
 		// TODO: Chan len
 		msgChan:   make(chan Message, 50),
 		msgBuffer: list.New(),
+		deadline:  utils.NewAValue[time.Time](time.Time{}),
+		closeErr:  &atomic.Pointer[StreamClosedError]{},
 	}
+	return stream
 }
 
 // Request returns the request associated with the stream.
@@ -56,7 +62,7 @@ func (s *Stream) Request() *Request {
 
 func (s *Stream) addMsg(msg Message) error {
 	if s.isClosed.Load() {
-		return ErrStreamClosed
+		return s.GetClosedErr()
 	}
 	s.msgBufferMtx.Lock()
 	defer s.msgBufferMtx.Unlock()
@@ -82,7 +88,7 @@ func (s *Stream) addMsg(msg Message) error {
 // Send sends a message on the stream.
 func (s *Stream) Send(msg Message) error {
 	if s.IsClosed() {
-		return ErrStreamClosed
+		return s.GetClosedErr()
 	}
 	return s.send(msg)
 }
@@ -98,12 +104,66 @@ func (s *Stream) send(msg Message) error {
 // Recv receives a messasge from the stream.
 func (s *Stream) Recv() (Message, error) {
 	if s.IsClosed() {
-		return Message{}, ErrStreamClosed
+		return Message{}, s.GetClosedErr()
 	}
-	msg, ok := <-s.msgChan
-	if !ok {
-		return Message{}, ErrStreamClosed
+	msg, ok, deadline := Message{}, false, s.deadline.Load()
+	if deadline == (time.Time{}) {
+		msg, ok = <-s.msgChan
+	} else {
+		until := time.Until(deadline)
+		// Return if the deadline time has been reached
+		if until <= 0 {
+			return Message{}, ErrTimedOut
+		}
+		timer := time.NewTimer(until)
+		select {
+		case msg, ok = <-s.msgChan:
+			if !ok {
+				return Message{}, s.GetClosedErr()
+			}
+		case <-timer.C:
+			return Message{}, ErrTimedOut
+		}
 	}
+	s.moveMsg()
+	return msg, nil
+}
+
+// RecvTimeout attempts to receive a message from the stream during the given
+// duration. Ignores any timeout set by Stream.SetRecvTimeout.
+func (s *Stream) RecvTimeout(dur time.Duration) (Message, error) {
+	if s.IsClosed() {
+		return Message{}, s.GetClosedErr()
+	}
+	msg, ok := Message{}, false
+RecvTimeoutLoop:
+	for {
+		// Check to see if theres already a value (timer not needed)
+		select {
+		case msg, ok = <-s.msgChan:
+			if !ok {
+				return Message{}, s.GetClosedErr()
+			}
+			break RecvTimeoutLoop
+		default:
+		}
+		timer := time.NewTimer(dur)
+		select {
+		case msg, ok = <-s.msgChan:
+			timer.Stop()
+			if !ok {
+				return Message{}, s.GetClosedErr()
+			}
+			break RecvTimeoutLoop
+		case <-timer.C:
+			return Message{}, ErrTimedOut
+		}
+	}
+	s.moveMsg()
+	return msg, nil
+}
+
+func (s *Stream) moveMsg() {
 	s.msgBufferMtx.Lock()
 	// Add another one to the channel if possible
 	if s.msgBuffer.Len() != 0 {
@@ -112,7 +172,14 @@ func (s *Stream) Recv() (Message, error) {
 		s.msgBuffer.Remove(e)
 	}
 	s.msgBufferMtx.Unlock()
-	return msg, nil
+}
+
+// SetRecvDeadline sets the time at which Recv calls timeout. This does not
+// change the deadline for Recv calls that are currently in process. Passing
+// time.Time{} removes the deadline. If the deadline has passed, all calls to
+// Recv return ErrTimedOut.
+func (s *Stream) SetRecvDeadline(t time.Time) {
+	s.deadline.Store(t)
 }
 
 // IsClosed returns whether the stream is closed.
@@ -122,12 +189,28 @@ func (s *Stream) IsClosed() bool {
 
 // Close closes the stream.
 func (s *Stream) Close() error {
-	return s.close(true)
+	return s.closeWithMessage(true, Message{}, Message{})
+}
+
+// CloseWithMessage closes the stream with the message to be sent to the
+// client.
+func (s *Stream) CloseWithMessage(msg Message) error {
+	return s.closeWithMessage(true, msg, Message{})
 }
 
 func (s *Stream) close(send bool) error {
+	return s.closeWithMessage(send, Message{}, Message{})
+}
+
+// This is used for when a client sends a close message. There is no need for
+// the `send` parameter since the client has already closed the stream.
+func (s *Stream) closeWithMsgRecvd(msg Message) {
+	s.closeWithMessage(false, Message{}, msg)
+}
+
+func (s *Stream) closeWithMessage(send bool, msg, msgRecvd Message) error {
 	if s.isClosed.Swap(true) {
-		return ErrStreamClosed
+		return s.GetClosedErr()
 	}
 	close(s.msgChan)
 	s.conn.streams.Apply(func(mp *map[uint64]*Stream) {
@@ -136,7 +219,25 @@ func (s *Stream) close(send bool) error {
 	if !send {
 		return nil
 	}
-	return s.send(Message{flags: MsgFlagClose, Body: nil})
+	msg.flags = MsgFlagClose
+	err := s.send(msg)
+	s.closeErr.CompareAndSwap(nil, &StreamClosedError{
+		Message:      msgRecvd,
+		HasMessage:   !send,
+		ClientClosed: !send,
+	})
+	return err
+}
+
+// GetClosedErr returns the StreamClosedError associated with the stream
+// closure. Returns nil if the stream isn't closed.
+func (s *Stream) GetClosedErr() *StreamClosedError {
+	if !s.isClosed.Load() {
+		return nil
+	} else if sce := s.closeErr.Load(); sce != nil {
+		return sce
+	}
+	return &StreamClosedError{}
 }
 
 // Message is a message sent/received to/from a stream.
@@ -145,6 +246,10 @@ type Message struct {
 	flags byte
 	// Body is the body of the stream.
 	Body *bytes.Buffer
+}
+
+func NewMessage(body []byte) Message {
+	return Message{Body: bytes.NewBuffer(body)}
 }
 
 // BodyBytes returns the message body as a byte slice.
@@ -198,4 +303,30 @@ func (msg Message) WriteTo(w io.Writer) (n int64, err error) {
 		n, err = utils.WriteAll(w, buf[:])
 	}
 	return
+}
+
+// StreamClosedError represents an error due to the stream being closed.
+type StreamClosedError struct {
+	// Message is the message sent on close, if there was one. This is not
+	// populated if the caller closed the stream (e.g., if a client gets this
+	// message due to the client closing the stream, it won't be set).
+	// NOTE: Make sure to take note that consuming the bytes from the body buffer
+	// takes effect everywhere since the body buffer is a pointer. Anyone else
+	// holding that specific instance of the error will also have their body
+	// bytes consumed.
+	Message Message
+	// HasMessage is whether there was a message sent.
+	HasMessage bool
+	// ClientClosed is whether the client closed the stream or not. This could be
+	// from a purposeful close or a close due to error (e.g., network).
+	ClientClosed bool
+}
+
+func (sce *StreamClosedError) Error() string {
+	var l int
+	if sce.Message.Body != nil {
+		l = sce.Message.Body.Len()
+	}
+	// TODO: What/what not to show?
+	return fmt.Sprintf("StreamClosedError (message len: %d)", l)
 }
