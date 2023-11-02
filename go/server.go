@@ -2,6 +2,7 @@ package jtrpc
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	utils "github.com/johnietre/utils/go"
+	webs "golang.org/x/net/websocket"
 )
 
 const (
@@ -186,6 +188,10 @@ func (s *Server) handle(nconn net.Conn) {
 	}
 
 	conn := newServerConn(nconn)
+	s.handleServerConn(conn)
+}
+
+func (s *Server) handleServerConn(conn *serverConn) {
 	defer conn.Close()
 	lw := utils.NewLockedWriter(conn)
 	for {
@@ -417,9 +423,148 @@ func (s *Server) handleReq(
 	return nil
 }
 
+// ServeHTTP implements the http.Handler interface. It can handle regular
+// requests and websockets. If the path is not empty ("" or "/"), the handler
+// is attempted to be retrieved. If the handler is not a stream, currently,
+// any HTTP method is allowed. If the handler is a stream, a websocket hijack
+// is attempted. The websocket client should send a jtrpc Request through the
+// websocket to which a response will be sent. If the resposne status is not
+// OK, the websocket is closed. Otherwise, the websocket can be treated like a
+// normal stream. If the path is empty, then the websocket will be treated the
+// same as a TCP connection connecting to the server normally. The websocket
+// should follow the same process as any other TCP connection (e.g., sending
+// initial connection bytes).
+// When checking the path in the request, if there is no leading slash, a
+// leading slash is appended. Then, if the path is not a match with the leading
+// slash, it is removed and another attempt is made. The process is repeated
+// for stream handlers if no regular handler is matched.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// TODO
-	http.Error(w, "Not implemented", http.StatusNotImplemented)
+	makeReq := func(path string) *Request {
+		headersMap := make(map[string]string, len(r.Header))
+		for k, v := range r.Header {
+			l := len(v)
+			if l != 0 {
+				headersMap[k] = v[l-1]
+			} else {
+				headersMap[k] = ""
+			}
+		}
+		mbr := http.MaxBytesReader(w, r.Body, s.MaxBodyLen)
+		body := bytes.NewBuffer(nil)
+		if n, err := io.Copy(body, mbr); err != nil {
+			http.Error(w, fmt.Sprint(s.MaxBodyLen), http.StatusRequestEntityTooLarge)
+			return nil
+		} else if n == 0 {
+			body = nil
+		}
+		return &Request{
+			ctx:        context.WithValue(r.Context(), httpReqCtxKey, r),
+			RemoteAddr: r.RemoteAddr,
+			Path:       path,
+			Headers:    &Headers{m: headersMap},
+			Body:       body,
+		}
+	}
+	path := r.URL.Path
+	if path == "" || path[0] != '/' {
+		path = "/" + path
+	}
+	if path == "/" {
+		webs.Handler(s.wsHandler).ServeHTTP(w, r)
+		return
+	}
+	// Check for regular handler
+	handler := s.Mux.GetHandler(path)
+	if handler == nil {
+		path = path[1:]
+		handler = s.Mux.GetHandler(path)
+	}
+	if handler != nil {
+		if mw := s.Mux.GetMiddleware(); mw != nil {
+			handler = mw(handler)
+		}
+		req := makeReq(path)
+		if req == nil {
+			return
+		}
+		resp := &Response{
+			Request: req,
+		}
+		handler.Handle(req, resp)
+		for k, v := range resp.Headers {
+			w.Header().Set(k, v)
+		}
+		w.WriteHeader(StatusToHTTP(resp.StatusCode))
+		if resp.body != nil {
+			io.CopyN(w, resp.body, int64(resp.bodyLen))
+			resp.body.Close()
+		}
+		return
+	}
+	path = "/" + path
+	streamHandler := s.Mux.GetStreamHandler(path)
+	if streamHandler == nil {
+		path = path[1:]
+		streamHandler = s.Mux.GetStreamHandler(path)
+	}
+	if streamHandler == nil {
+		http.NotFound(w, r)
+		return
+	}
+	s.wsStreamHandler(w, r, path, streamHandler)
+}
+
+func (s *Server) wsHandler(ws *webs.Conn) {
+	s.handle(ws)
+}
+
+func (s *Server) wsStreamHandler(
+	w http.ResponseWriter, r *http.Request,
+	path string, streamHandler StreamHandler,
+) {
+	webs.Handler(func(ws *webs.Conn) {
+		req, err := RequestFromReader(ws, s.MaxBodyLen)
+		if err != nil {
+			if err == ErrBodyTooLarge {
+				resp := &Response{StatusCode: StatusBodyTooLarge}
+				resp.SetBodyString(ErrBodyTooLarge.Error())
+				resp.WriteTo(ws)
+			}
+			return
+		}
+		resp := &Response{reqId: req.id, flags: req.Flags}
+		handler := noopHandler
+		if mw := s.Mux.GetMiddleware(); mw != nil {
+			handler = mw(handler)
+		}
+		if mw := s.Mux.GetStreamMiddleware(path); mw != nil {
+			handler = mw(handler)
+		}
+		// Run the and add the stream if necessary
+		handler.Handle(req, resp)
+		_, err = resp.WriteTo(ws)
+		// Handle stream
+		if resp.StatusCode == StatusOK && err == nil {
+			sconn := newServerConn(ws)
+			lw := utils.NewLockedWriter(sconn)
+			stream := newStream(lw, sconn, req)
+			streamHandler.HandleStream(stream)
+		}
+	}).ServeHTTP(w, r)
+}
+
+type httpReqCtxKeyType string
+
+const httpReqCtxKey httpReqCtxKeyType = "jtrpc"
+
+// GetHTTPRequest returns the http.Request the jtrpc.Request was created from,
+// if there was one. Currently doesn't work with websockets.
+func GetHTTPRequest(ctx context.Context) *http.Request {
+	ir := ctx.Value(httpReqCtxKey)
+	if ir == nil {
+		return nil
+	}
+	return ir.(*http.Request)
 }
 
 func setReadTimeout(conn net.Conn, dur time.Duration) {

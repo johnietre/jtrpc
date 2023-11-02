@@ -3,7 +3,9 @@ package jtrpc
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
+	"net/http"
 
 	utils "github.com/johnietre/utils/go"
 )
@@ -145,6 +147,42 @@ func newRequest(
 	}
 }
 
+var (
+	ErrBodyTooLarge = fmt.Errorf("body too large")
+)
+
+// RequestFromReader reads a requests from the reader and returns it.
+func RequestFromReader(r io.Reader, maxBodyLen int64) (*Request, error) {
+	var buf [21]byte
+	if _, err := io.ReadFull(r, buf[:]); err != nil {
+		return nil, err
+	}
+	id := get8(buf[:])
+	flags := buf[8]
+	pathLen := int(get2(buf[9:]))
+	headersLen := int(get2(buf[11:]))
+	bodyLen := int64(get8(buf[13:]))
+	if bodyLen > maxBodyLen {
+		return nil, ErrBodyTooLarge
+	}
+	b := make([]byte, pathLen+headersLen)
+	if _, err := io.ReadFull(r, b); err != nil {
+		return nil, err
+	}
+	body := bytes.NewBuffer(nil)
+	if _, err := io.CopyN(body, r, bodyLen); err != nil {
+		return nil, err
+	}
+	return &Request{
+		id:      id,
+		ctx:     context.Background(),
+		Flags:   flags,
+		Path:    string(b[:pathLen]),
+		Headers: newHeaders(utils.CloneSlice(b[pathLen:])),
+		Body:    body,
+	}, nil
+}
+
 func (r *Request) setContext(ctx context.Context) *Request {
 	r.ctx = ctx
 	return r
@@ -206,6 +244,34 @@ const (
 	// StatusInternalServerError is an InternalServerError status code.
 	StatusInternalServerError = 192
 )
+
+func StatusToHTTP(status byte) int {
+	switch status {
+	case StatusOK:
+		return http.StatusOK
+	case StatusNotFound:
+		return http.StatusNotFound
+	case StatusIsStream, StatusNotStream:
+		return http.StatusMethodNotAllowed
+	case StatusUnauthorized:
+		return http.StatusUnauthorized
+	case StatusBodyTooLarge:
+		return http.StatusRequestEntityTooLarge
+	case StatusInvalidInitialBytes:
+		// TODO
+		return http.StatusBadRequest
+	case StatusBadVersion:
+		return http.StatusHTTPVersionNotSupported
+	case StatusInternalServerError:
+		return http.StatusInternalServerError
+	}
+	if status < 128 {
+		return http.StatusOK
+	} else if status < 192 {
+		return http.StatusBadRequest
+	}
+	return http.StatusInternalServerError
+}
 
 // Response is a response to be sent. The body is read (and closed if
 // necessary) after returning from the handler. Responses passed to handlers
