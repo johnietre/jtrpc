@@ -133,7 +133,7 @@ func (mm MapMux) Middleware(ms ...Middleware) {
 	if mm.middleware == nil {
 		mm.middleware, ms = ms[0], ms[1:]
 	}
-	for _, mid := range ms[1:] {
+	for _, mid := range ms {
 		om, mw := mm.middleware, mid
 		mm.middleware = func(next Handler) Handler {
 			return om(mw(next))
