@@ -140,6 +140,7 @@ func newRequest(
 ) *Request {
 	return &Request{
 		id:         id,
+		ctx:        context.Background(),
 		RemoteAddr: addr,
 		Flags:      flags,
 		Path:       path,
