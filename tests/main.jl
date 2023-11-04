@@ -8,7 +8,8 @@ function die(msg::String)
     exit()
 end
 
-client = JtRPC.dial(ip"127.0.0.1", 8008)
+#client = JtRPC.dial(ip"127.0.0.1", 8008)
+client = JtRPC.dial(ip"127.0.0.1", 8080)
 
 req = JtRPC.Request("/echo", "no and yes")
 resp_chan = JtRPC.send!(client, req)

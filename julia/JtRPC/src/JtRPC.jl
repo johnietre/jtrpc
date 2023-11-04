@@ -113,7 +113,7 @@ end
 
 function recv!(stream::Stream; throw_error::Bool=false)::Union{Message, Nothing}
     if isclosed(stream)
-        throw_error && return nothing
+        !throw_error && return nothing
         err = @atomic stream.close_err
         throw(err === nothing ? StreamClosedError() : err)
     end
@@ -126,7 +126,7 @@ end
 
 function send!(stream::Stream, msg::Message; throw_error::Bool=false)::Bool
     if isclosed(stream)
-        throw_error && return false
+        !throw_error && return false
         err = @atomic stream.close_err
         throw(err === nothing ? StreamClosedError() : err)
     end

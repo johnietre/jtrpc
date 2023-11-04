@@ -74,8 +74,8 @@ type MapMux struct {
 }
 
 // NewMapMux creates a new MapMux.
-func NewMapMux() MapMux {
-	return MapMux{
+func NewMapMux() *MapMux {
+	return &MapMux{
 		handlers:          make(map[string]Handler),
 		streamMiddlewares: make(map[string]Middleware),
 		streamHandlers:    make(map[string]StreamHandler),
@@ -83,7 +83,7 @@ func NewMapMux() MapMux {
 }
 
 // Handle implements the Mux.Handle.
-func (mm MapMux) Handle(path string, h Handler, ms ...Middleware) {
+func (mm *MapMux) Handle(path string, h Handler, ms ...Middleware) {
 	// Wrap the handler/middlewares.
 	if l := len(ms); l != 0 {
 		for i := l - 1; i >= 0; i-- {
@@ -94,7 +94,7 @@ func (mm MapMux) Handle(path string, h Handler, ms ...Middleware) {
 }
 
 // HandleStream implements the Mux.HandleStream function.
-func (mm MapMux) HandleStream(path string, h StreamHandler, ms ...Middleware) {
+func (mm *MapMux) HandleStream(path string, h StreamHandler, ms ...Middleware) {
 	// Wrap the handler/middlewares.
 	if len(ms) != 0 {
 		m := ms[0]
@@ -110,14 +110,14 @@ func (mm MapMux) HandleStream(path string, h StreamHandler, ms ...Middleware) {
 }
 
 // HandleFunc is an alias for Handle(path, HandlerFunc(f)) function.
-func (mm MapMux) HandleFunc(
+func (mm *MapMux) HandleFunc(
 	path string, f func(*Request, *Response), ms ...Middleware,
 ) {
 	mm.handlers[path] = HandlerFunc(f)
 }
 
 // HandleStreamFunc is an alias for HandleStream(path, StreamHandlerFunc(f)).
-func (mm MapMux) HandleStreamFunc(
+func (mm *MapMux) HandleStreamFunc(
 	path string, f func(*Stream), ms ...Middleware,
 ) {
 	mm.streamHandlers[path] = StreamHandlerFunc(f)
@@ -125,7 +125,7 @@ func (mm MapMux) HandleStreamFunc(
 
 // Middleware implements the Mux.Middleware function. This adds middleware each
 // time it is called, never replacing the middleware.
-func (mm MapMux) Middleware(ms ...Middleware) {
+func (mm *MapMux) Middleware(ms ...Middleware) {
 	if len(ms) == 0 {
 		return
 	}
@@ -142,21 +142,21 @@ func (mm MapMux) Middleware(ms ...Middleware) {
 }
 
 // GetHandler implements the Mux.GetHandler function.
-func (mm MapMux) GetHandler(path string) Handler {
+func (mm *MapMux) GetHandler(path string) Handler {
 	return mm.handlers[path]
 }
 
 // GetStreamHandler implements the Mux.GetStreamHandler function.
-func (mm MapMux) GetStreamHandler(path string) StreamHandler {
+func (mm *MapMux) GetStreamHandler(path string) StreamHandler {
 	return mm.streamHandlers[path]
 }
 
 // GetStreamMiddleware implements the Mux.GetStreamMiddleware function.
-func (mm MapMux) GetStreamMiddleware(path string) Middleware {
+func (mm *MapMux) GetStreamMiddleware(path string) Middleware {
 	return mm.streamMiddlewares[path]
 }
 
 // GetMiddleware implements the Mux.GetMiddleware function.
-func (mm MapMux) GetMiddleware() Middleware {
+func (mm *MapMux) GetMiddleware() Middleware {
 	return mm.middleware
 }
