@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 
@@ -16,6 +17,12 @@ func main() {
 			fmt.Println("PATH:", req.Path)
 			fmt.Println("HEADERS:", req.Headers.Parse())
 			fmt.Println("========START HANDLER========")
+			req = req.SetContext(
+				context.WithValue(req.Context(), "another key", "another value"),
+			)
+			req = req.WithContext(
+				context.WithValue(req.Context(), "some key", "some value"),
+			)
 			next.Handle(req, resp)
 			fmt.Println("========END HANDLER========")
 			fmt.Println("========END MIDDLEWARE========")
@@ -55,6 +62,8 @@ func echoHandler(req *jtrpc.Request, resp *jtrpc.Response) {
 
 func streamHandler(stream *jtrpc.Stream) {
 	defer stream.Close()
+	fmt.Println("Context Value:", stream.Request().Context().Value("some key"))
+	fmt.Println("Context Value:", stream.Request().Context().Value("another key"))
 	for {
 		msg, err := stream.Recv()
 		if err != nil {

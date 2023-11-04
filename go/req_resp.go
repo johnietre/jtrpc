@@ -526,9 +526,26 @@ func RequestFromReader(r io.Reader, maxBodyLen int64) (*Request, error) {
 	}, nil
 }
 
-func (r *Request) setContext(ctx context.Context) *Request {
-	r.ctx = ctx
-	return r
+// Clone creates a deep copy of the request with the given context.
+func (r *Request) Clone(ctx context.Context) *Request {
+	var headers *Headers
+	if r.Headers != nil {
+		headers = r.Headers.Clone()
+	}
+	var body *bytes.Buffer
+	if r.Body != nil {
+		body := bytes.NewBuffer(nil)
+		body.Write(r.Body.Bytes())
+	}
+	return &Request{
+		id:         0,
+		ctx:        ctx,
+		RemoteAddr: r.RemoteAddr,
+		Flags:      r.Flags,
+		Path:       r.Path,
+		Headers:    headers,
+		Body:       body,
+	}
 }
 
 // Context returns the context associated with the request.
@@ -543,6 +560,18 @@ func (r *Request) WithContext(ctx context.Context) *Request {
 	*r2 = *r
 	r2.ctx = ctx
 	return r2
+}
+
+// SetContext sets the request's context to the passed context. This is useful
+// (and possibly required) for things like middleware that sits before a stream
+// handler as the stream handler gets passed the request passed to the
+// middleware, therefore does not see the changes made by something like
+// WithContext.
+// NOTE: Any calls to this should come before any calls that clone/copy the
+// request (like WithContext), if the request is meant to be modified.
+func (r *Request) SetContext(ctx context.Context) *Request {
+	r.ctx = ctx
+	return r
 }
 
 func hasStreamFlag(flags byte) bool {
