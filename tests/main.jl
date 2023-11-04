@@ -1,6 +1,7 @@
-push!(LOAD_PATH, "../julia")
+#push!(LOAD_PATH, "../julia")
+include("../julia/JtRPC/src/JtRPC.jl")
 
-import JtRPC
+#import JtRPC
 using Sockets
 
 function die(msg::String)
@@ -12,12 +13,15 @@ end
 client = JtRPC.dial(ip"127.0.0.1", 8080)
 
 req = JtRPC.Request("/echo", "no and yes")
+req.headers["h1"] = "value1"
+req.headers["h2"] = "value2"
+req.headers["header3579"] = "value3579"
 resp_chan = JtRPC.send!(client, req)
 resp = JtRPC.recv!(resp_chan)
 resp === nothing && die("expected response")
 JtRPC.parse_headers!(resp)
 println("Response: ", resp)
-println("Body: ", String(JtRPC.get_body(resp)))
+println("Body: ", String(resp.body))
 println()
 
 req = JtRPC.Request("/yes", "no and yes")
@@ -26,7 +30,7 @@ resp = JtRPC.recv!(resp_chan)
 resp === nothing && die("expected response")
 JtRPC.parse_headers!(resp)
 println("Response: ", resp)
-println("Body: ", String(JtRPC.get_body(resp)))
+println("Body: ", String(resp.body))
 println()
 
 req = JtRPC.Request("/yes")
@@ -35,7 +39,7 @@ resp = JtRPC.recv!(resp_chan)
 resp === nothing && die("expected response")
 JtRPC.parse_headers!(resp)
 println("Response: ", resp)
-println("Body: ", String(JtRPC.get_body(resp)))
+println("Body: ", String(resp.body))
 println()
 
 req = JtRPC.Request("/no", "no and yes")
@@ -44,14 +48,17 @@ resp = JtRPC.recv!(resp_chan)
 resp === nothing && die("expected response")
 JtRPC.parse_headers!(resp)
 println("Response: ", resp)
-println("Body: ", String(JtRPC.get_body(resp)))
+println("Body: ", String(resp.body))
 println()
 
 req = JtRPC.Request("/stream"; stream=true)
+req.headers["stream_header1"] = "value1"
+req.headers["stream_header2"] = "value2"
+req.headers["stream_header3579"] = "value3579"
 resp_chan = JtRPC.send!(client, req)
 resp = JtRPC.recv!(resp_chan)
 resp === nothing && die("expected response")
-stream = JtRPC.get_stream(resp)
+stream = resp.stream
 stream === nothing && error("Expected stream")
 while true
     global stream

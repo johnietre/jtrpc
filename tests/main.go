@@ -12,8 +12,13 @@ func main() {
 	srvr := jtrpc.NewServer(addr)
 	srvr.Middleware(func(next jtrpc.Handler) jtrpc.Handler {
 		return jtrpc.HandlerFunc(func(req *jtrpc.Request, resp *jtrpc.Response) {
-			fmt.Println(req.Path)
+			fmt.Println("========START MIDDLEWARE========")
+			fmt.Println("PATH:", req.Path)
+			fmt.Println("HEADERS:", req.Headers.Parse())
+			fmt.Println("========START HANDLER========")
 			next.Handle(req, resp)
+			fmt.Println("========END HANDLER========")
+			fmt.Println("========END MIDDLEWARE========")
 		})
 	})
 	srvr.HandleFunc("/yes", yesHandler)
@@ -34,7 +39,7 @@ func main() {
 }
 
 func yesHandler(req *jtrpc.Request, resp *jtrpc.Response) {
-	fmt.Printf("Headers: %+v\n", req.Headers.Map())
+	fmt.Printf("Headers: %+v\n", req.Headers.Parse())
 	fmt.Println("Body:", req.Body.String())
 }
 
@@ -44,9 +49,7 @@ func noHandler(req *jtrpc.Request, resp *jtrpc.Response) {
 }
 
 func echoHandler(req *jtrpc.Request, resp *jtrpc.Response) {
-	for k, v := range req.Headers.Map() {
-		resp.Headers[k] = v
-	}
+	resp.Headers = req.Headers
 	resp.SetBodyReader(req.Body, int64(req.Body.Len()))
 }
 
@@ -55,7 +58,11 @@ func streamHandler(stream *jtrpc.Stream) {
 	for {
 		msg, err := stream.Recv()
 		if err != nil {
-			log.Println(err)
+			if sce := jtrpc.GetStreamClosedError(err); sce != nil {
+				log.Println("Stream closed error:", err)
+			} else {
+				log.Println("Other error:", err)
+			}
 			break
 		}
 		fmt.Println("Incoming message Body:", msg.BodyString())

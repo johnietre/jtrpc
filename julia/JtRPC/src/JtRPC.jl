@@ -6,7 +6,7 @@ export
     Client, Request, Response, Stream, Message,
     dial, send!, recv!, close!, isclosed,
     HeaderBytes, HeaderDict, Headers,
-    get_header, set_header!, parse_headers!, get_body, get_stream,
+    get_header, set_header!, parse_headers!,
     MAX_HEADERS_LEN,
     FLAG_STREAM_MSG,
     REQ_FLAG_STREAM, REQ_FLAG_TIMEOUT, REQ_FLAG_CANCEL,
@@ -74,6 +74,9 @@ Request(path::String, body::String) = Request(path, Bytes(body))
 Request(
     path::String, headers::HeaderDict, body::Bytes,
 ) = Request(0, 0, path, headers, body)
+Request(
+    path::String, headers::HeaderDict, body::String,
+) = Request(0, 0, path, headers, Bytes(body))
 
 function get_header(req::Request, key::String)::Union{String, nothing}
     get(req.headers, key, nothing)
@@ -194,7 +197,8 @@ mutable struct Response
     status_code::Byte
     path::String
     headers::Headers
-    body_or_stream::Union{Bytes, Stream}
+    body::Bytes
+    stream::Union{Stream, Nothing}
 end
 
 function read_response(r::IO)::Response
@@ -202,25 +206,17 @@ function read_response(r::IO)::Response
     req_id = from_le_bytes8(buf)
     flags = buf[9]
     status_code = buf[10]
-    hl = from_le_bytes2(buf[11:end])
+    hl = from_le_bytes2(buf[11:12])
     bl = from_le_bytes8(buf[13:end])
     headers = hl == 0 ? Bytes() : read(r, hl)
-    body_or_stream = bl == 0 ? Bytes() : read(r, hl)
-    Response(req_id, flags, status_code, "", headers, body_or_stream)
+    body = bl == 0 ? Bytes() : read(r, hl)
+    Response(req_id, flags, status_code, "", headers, body, nothing)
 end
 
 function parse_headers!(resp::Response)::HeaderDict
     typeof(resp.headers) == HeaderDict && return resp.headers
     resp.headers = parse_headers(resp.headers)
     resp.headers
-end
-
-function get_body(resp::Response)::Union{Bytes, Nothing}
-    typeof(resp.body_or_stream) == Bytes ? resp.body_or_stream : nothing
-end
-
-function get_stream(resp::Response)::Union{Stream, Nothing}
-    typeof(resp.body_or_stream) == Stream ? resp.body_or_stream : nothing
 end
 
 function parse_headers(hb::HeaderBytes)::HeaderDict
@@ -359,16 +355,20 @@ function handle_resp!(client::Client, req_tup::ReqTup, buf::Bytes)
     bl = from_le_bytes8(buf[4:11])
 
     hb = read(client.conn, hl)
-    bs = if has_stream
+    bb = read(client.conn, bl)
+    stream = if has_stream
         # TODO: Channel length
         stream = Stream(client, req, Channel{Message}(Inf), false, nothing)
         lock(() -> client.streams[req.id] = stream, client.streams_lock)
         stream
     else
-        read(client.conn, bl)
+        nothing
     end
     try
-        put!(chan, Response(req.id, flags, status_code, req.path, hb, bs))
+        put!(
+            chan,
+            Response(req.id, flags, status_code, req.path, hb, bb, stream),
+        )
         # TODO: With exception?
         close(chan)
     catch
@@ -420,8 +420,8 @@ function send!(client::Client, req::Request)::RespChan
         length(val) > MAX_HEADERS_LEN && throw(HEADER_TOO_LONG)
         append!(
             headers_bytes,
-            to_le_bytes(UInt16(length(key))), key,
-            to_le_bytes(UInt16(length(val))), val,
+            to_le_bytes(UInt16(length(key))), to_le_bytes(UInt16(length(val))),
+            key, val,
         )
         length(headers_bytes) > MAX_HEADERS_LEN && throw(HEADER_TOO_LONG)
     end

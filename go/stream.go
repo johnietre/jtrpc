@@ -3,6 +3,7 @@ package jtrpc
 import (
 	"bytes"
 	"container/list"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -61,7 +62,7 @@ func (s *Stream) Request() *Request {
 }
 
 func (s *Stream) addMsg(msg Message) error {
-	if s.isClosed.Load() {
+	if s.IsClosed() {
 		return s.GetClosedErr()
 	}
 	s.msgBufferMtx.Lock()
@@ -103,9 +104,6 @@ func (s *Stream) send(msg Message) error {
 
 // Recv receives a messasge from the stream.
 func (s *Stream) Recv() (Message, error) {
-	if s.IsClosed() {
-		return Message{}, s.GetClosedErr()
-	}
 	msg, ok, deadline := Message{}, false, s.deadline.Load()
 	if deadline == (time.Time{}) {
 		msg, ok = <-s.msgChan
@@ -118,12 +116,12 @@ func (s *Stream) Recv() (Message, error) {
 		timer := time.NewTimer(until)
 		select {
 		case msg, ok = <-s.msgChan:
-			if !ok {
-				return Message{}, s.GetClosedErr()
-			}
 		case <-timer.C:
 			return Message{}, ErrTimedOut
 		}
+	}
+	if !ok {
+		return Message{}, s.GetClosedErr()
 	}
 	s.moveMsg()
 	return msg, nil
@@ -132,9 +130,6 @@ func (s *Stream) Recv() (Message, error) {
 // RecvTimeout attempts to receive a message from the stream during the given
 // duration. Ignores any timeout set by Stream.SetRecvTimeout.
 func (s *Stream) RecvTimeout(dur time.Duration) (Message, error) {
-	if s.IsClosed() {
-		return Message{}, s.GetClosedErr()
-	}
 	msg, ok := Message{}, false
 RecvTimeoutLoop:
 	for {
@@ -329,4 +324,18 @@ func (sce *StreamClosedError) Error() string {
 	}
 	// TODO: What/what not to show?
 	return fmt.Sprintf("StreamClosedError (message len: %d)", l)
+}
+
+// IsStreamClosedError returns whether the error is a StreamClosedError.
+func IsStreamClosedError(err error) bool {
+	var sce *StreamClosedError
+	return errors.As(err, &sce)
+}
+
+// GetStreamClosedError attempts to convert the error into a *StreamClosedError
+// using errors.As, returning nil if the conversion fails.
+func GetStreamClosedError(err error) *StreamClosedError {
+	var sce *StreamClosedError
+	errors.As(err, &sce)
+	return sce
 }

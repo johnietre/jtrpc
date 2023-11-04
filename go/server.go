@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -335,7 +336,7 @@ func (s *Server) handleReq(
 			conn.reqs.Apply(func(mp *map[uint64]*Request) {
 				(*mp)[req.id] = req
 			})
-			resp := &Response{reqId: id, flags: flags}
+			resp := newResponse(id, flags, req)
 			handler := noopHandler
 			// Add middlewares
 			if mw := s.Mux.GetMiddleware(); mw != nil {
@@ -403,7 +404,8 @@ func (s *Server) handleReq(
 	conn.reqs.Apply(func(mp *map[uint64]*Request) {
 		(*mp)[req.id] = req
 	})
-	resp := &Response{reqId: id}
+	// TODO: Flags
+	resp := newResponse(id, 0, req)
 	// Pass to middleware and get new handler
 	if mw := s.Mux.GetMiddleware(); mw != nil {
 		handler = mw(handler)
@@ -487,13 +489,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if req == nil {
 			return
 		}
-		resp := &Response{
-			Request: req,
-		}
+		// TODO: Flags
+		resp := newResponse(0, 0, req)
 		handler.Handle(req, resp)
-		for k, v := range resp.Headers {
-			w.Header().Set(k, v)
-		}
+		resp.Headers, _ = FromHTTPHeader(
+			w.Header(),
+			true,
+			func(_ string, vs []string) string {
+				return strings.Join(vs, ",")
+			},
+		)
 		w.WriteHeader(StatusToHTTP(resp.StatusCode))
 		if resp.body != nil {
 			io.CopyN(w, resp.body, int64(resp.bodyLen))
@@ -532,7 +537,7 @@ func (s *Server) wsStreamHandler(
 			}
 			return
 		}
-		resp := &Response{reqId: req.id, flags: req.Flags}
+		resp := newResponse(req.id, req.Flags, req)
 		handler := noopHandler
 		if mw := s.Mux.GetMiddleware(); mw != nil {
 			handler = mw(handler)
