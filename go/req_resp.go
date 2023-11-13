@@ -1,5 +1,7 @@
 package jtrpc
 
+// TODO: In headers, copy bytes in future bytes methods for Headers?
+
 import (
 	"bytes"
 	"context"
@@ -71,10 +73,6 @@ type Headers struct {
 	parsed bool
 }
 
-func newHeaders(bytes []byte) *Headers {
-	return &Headers{bytes: bytes}
-}
-
 // NewHeaders creates a new Headers.
 func NewHeaders(parsed bool) *Headers {
 	var m map[string]string
@@ -89,6 +87,10 @@ func NewHeaders(parsed bool) *Headers {
 		m:      m,
 		parsed: parsed,
 	}
+}
+
+func newHeaders(bytes []byte) *Headers {
+	return &Headers{bytes: bytes}
 }
 
 // FromHTTPHeader takes an http.Header and returns a parsed Headers. Given that
@@ -219,13 +221,8 @@ func (h *Headers) Encode() ([]byte, error) {
 	headersLen := 0
 	for k, v := range h.m {
 		kl, vl := len(k), len(v)
-		if kl > MaxHeadersLen || vl > MaxHeadersLen {
-			return nil, ErrHeadersTooLarge
-		}
-		kvl := kl + vl
-		headersLen += kvl
+		headersLen += kl + vl
 		if headersLen > MaxHeadersLen {
-			headersLen -= kvl
 			return nil, ErrHeadersTooLarge
 		}
 		b = append2(b, uint16(kl))
@@ -258,11 +255,8 @@ func (h *Headers) EncodeP() ([]byte, map[string]string) {
 	headersLen := 0
 	for k, v := range h.m {
 		kl, vl := len(k), len(v)
-		if kl > MaxHeadersLen || vl > MaxHeadersLen {
-			continue
-		}
 		kvl := kl + vl
-		headersLen += kvl
+		headersLen += kl + vl
 		if headersLen > MaxHeadersLen {
 			headersLen -= kvl
 			continue
@@ -313,10 +307,7 @@ func (h *Headers) GetChecked(key string) (string, bool) {
 		return val, ok
 	}
 	b, wkl := h.bytes, len(key)
-	for l := len(b); l > 0; {
-		if l < 4 {
-			break
-		}
+	for l := len(b); l >= 4; {
 		kl, vl := int(get2(b)), int(get2(b[2:]))
 		kvl := kl + vl
 		b = b[4:]
@@ -325,10 +316,8 @@ func (h *Headers) GetChecked(key string) (string, bool) {
 			break
 		}
 		l -= 4
-		if kl == wkl {
-			if string(b[:kl]) == key {
-				return string(b[kl:kvl]), true
-			}
+		if kl == wkl && string(b[:kl]) == key {
+			return string(b[kl:kvl]), true
 		}
 		b = b[kvl:]
 		l -= kvl
@@ -711,12 +700,14 @@ func (r *Response) WriteTo(w io.Writer) (n int64, err error) {
 	place8(buf, r.reqId)
 	buf[8], buf[9] = r.flags, r.StatusCode
 	// Marshal headers
-	headers, err := r.Headers.Encode()
-	if err == nil {
-		buf = append(buf, headers...)
+	if r.Headers != nil {
+		headers, err := r.Headers.Encode()
+		if err == nil {
+			buf = append(buf, headers...)
+		}
+		headersLen := len(headers)
+		place2(buf[10:], uint16(headersLen))
 	}
-	headersLen := len(headers)
-	place2(buf[10:], uint16(headersLen))
 	place8(buf[12:], r.bodyLen)
 	// Add lengths and write buf
 	if n, err = utils.WriteAll(w, buf); err != nil {

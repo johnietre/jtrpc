@@ -389,7 +389,8 @@ function handle_stream_msg!(client::Client, stream::Stream, buf::Bytes)
         put!(stream.chan, Message(flags, mb))
     catch
         # Stream (channel) already closed by client
-        close_stream!(stream, true)
+        #close_stream!(stream, true)
+        close_stream!(stream, false)
     end
     return
     # TODO: Send msg anyway?
@@ -426,11 +427,7 @@ function send!(client::Client, req::Request)::RespChan
         length(headers_bytes) > MAX_HEADERS_LEN && throw(HEADER_TOO_LONG)
     end
     # Append headers and body length
-    has_body = req.flags & (REQ_FLAG_CANCEL | REQ_FLAG_STREAM) == 0
     bl = UInt64(length(req.body))
-    if !has_body && bl != 0
-        throw(ErrorException("body length should be 0"))
-    end
     append!(
         req_bytes,
         to_le_bytes(UInt16(length(headers_bytes))),
@@ -443,7 +440,7 @@ function send!(client::Client, req::Request)::RespChan
     lock(client.conn_write_lock) do
         lock(client.reqs_lock) do
             writeall(client.conn, req_bytes)
-            if has_body
+            if length(req.body) != 0
                 writeall(client.conn, req.body)
             end
             client.reqs[req.id] = (req, chan)

@@ -58,6 +58,9 @@ req.headers["stream_header3579"] = "value3579"
 resp_chan = JtRPC.send!(client, req)
 resp = JtRPC.recv!(resp_chan)
 resp === nothing && die("expected response")
+JtRPC.parse_headers!(resp)
+println("Response: ", resp)
+println("Body: ", String(resp.body))
 stream = resp.stream
 stream === nothing && error("Expected stream")
 while true
