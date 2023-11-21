@@ -62,10 +62,10 @@ impl fmt::Display for ErrResp {
         // TODO: Body?
         write!(
             f,
-            "Status Code: {}, Path: \"{}\", Body: {}",
+            "Status Code: {}, Path: \"{}\", Body: [{} bytes]",
             self.status_code,
             self.path,
-            self.body_string_lossy()
+            self.body.len(),
         )
     }
 }
