@@ -645,7 +645,7 @@ type Response struct {
 	StatusCode byte
 	// Headers is the headers to be sent back.
 	Headers *Headers
-	body    io.ReadCloser
+	body    *ReadCloseCounter
 	bodyLen uint64
 	// Request is the request that is associated with this response. As of right
 	// now, not set for Server request/responses.
@@ -681,7 +681,24 @@ func (r *Response) SetBodyReader(ir io.Reader, l int64) {
 // SetBodyReadCloser sets the body to the given read closer.
 // Takes a io.ReadCloser and the number of bytes to read.
 func (r *Response) SetBodyReadCloser(rc io.ReadCloser, l int64) {
-	r.body, r.bodyLen = rc, uint64(l)
+	ul := uint64(l)
+	r.body, r.bodyLen = FromReader(rc, ul), ul
+}
+
+// Body gets the io.ReadCloser witht the response's body.
+func (r *Response) Body() io.ReadCloser {
+	return r.body
+}
+
+// BodyLenLeft gets the number of bytes left in the body reader.
+func (r *Response) BodyLenLeft() uint64 {
+	return r.body.Len
+}
+
+// BodyLen gets the total length of the body. This will be the same no matter
+// how many bytes have already been read from the body reader.
+func (r *Response) BodyLen() uint64 {
+	return r.bodyLen
 }
 
 // WriteTo writes the response to the writer. This is called internally when
@@ -723,6 +740,38 @@ func (r *Response) WriteTo(w io.Writer) (n int64, err error) {
 	return
 }
 
+// ReadFrom attempts to read a response from a reader, populating the response
+// fields.
+func (r *Response) ReadFrom(reader io.Reader) (nr int64, err error) {
+	n, buf := 0, make([]byte, 20)
+	if n, err = io.ReadFull(reader, buf); err != nil {
+		return int64(n), err
+	}
+	nr = 20
+	r.reqId, r.flags, r.StatusCode = get8(buf), buf[8], buf[9]
+	hl, bl := get2(buf[10:]), get8(buf[12:])
+	var headerBytes []byte
+	if hl != 0 {
+		headerBytes = make([]byte, int(hl))
+		n, err = io.ReadFull(reader, headerBytes)
+		nr += int64(n)
+		if err != nil {
+			return
+		}
+	}
+	r.Headers = newHeaders(headerBytes)
+	if bl != 0 {
+		n, bodyBuf, bodyLen := int64(0), bytes.NewBuffer(nil), int64(bl)
+		n, err = io.CopyN(bodyBuf, reader, bodyLen)
+		nr += n
+		if err != nil {
+			return
+		}
+		r.SetBodyReader(bodyBuf, bodyLen)
+	}
+	return
+}
+
 // TODO: Flags
 func writeResp(
 	lw *utils.LockedWriter, reqId uint64, statusCode byte,
@@ -755,14 +804,69 @@ func writeRespMsg(
 	return int(nn), err
 }
 
-type closerWrapper struct {
+// ErrorResp is a wrapper around a Response to make it conform to the error
+// interface.
+type ErrorResp struct {
+	Resp *Response
+}
+
+// Error implements the Error method of the error interface.
+func (er *ErrorResp) Error() string {
+	path := ""
+	if er.Resp.Request != nil {
+		path = er.Resp.Request.Path
+	}
+	return fmt.Sprintf(
+		"Status Code: %d, Path: %q, Body: [%d bytes]",
+		er.Resp.StatusCode, path, er.Resp.bodyLen,
+	)
+}
+
+// CloserWrapper wrappers an io.Reader to give it a noop Close method to
+// conform with io.ReadCloser.
+type CloserWrapper struct {
 	io.Reader
 }
 
-func (closerWrapper) Close() error {
+// Close is a noop function to conform with io.ReadCloser.
+func (CloserWrapper) Close() error {
 	return nil
 }
 
 func wrapCloser(r io.Reader) io.ReadCloser {
-	return closerWrapper{Reader: r}
+	return CloserWrapper{Reader: r}
+}
+
+// ReadCloseCounter is a wrapper around an io.ReadCloser that keeps track of
+// how many bytes are left in the reader. Concurrent reads are not supported.
+type ReadCloseCounter struct {
+	io.ReadCloser
+	Len uint64
+}
+
+// FromReader creates a new ReadCloseCounter from an io.Reader and length. Will
+// first attempt to convert the passed Reader into a ReadCloser, then will wrap
+// the reader in a CloserWrapper should that fail.
+func FromReader(r io.Reader, n uint64) *ReadCloseCounter {
+	if rc, ok := r.(io.ReadCloser); ok {
+		return &ReadCloseCounter{ReadCloser: rc, Len: n}
+	}
+	return &ReadCloseCounter{ReadCloser: wrapCloser(r), Len: n}
+}
+
+// Read reads from the underlying ReadCloser, appropriately decreasing the Len.
+func (rcc *ReadCloseCounter) Read(p []byte) (n int, err error) {
+	if rcc.Len == 0 {
+		return 0, io.EOF
+	} else if uint64(len(p)) > rcc.Len {
+		p = p[:rcc.Len]
+	}
+	n, err = rcc.ReadCloser.Read(p)
+	rcc.Len -= uint64(n)
+	return
+}
+
+// Close attempts to close the underlying ReadCloser.
+func (rcc *ReadCloseCounter) Close() error {
+	return rcc.ReadCloser.Close()
 }

@@ -109,7 +109,18 @@ func (s *Server) HandleStreamFunc(
 	s.Mux.HandleStream(path, StreamHandlerFunc(h), ms...)
 }
 
-// Run runs the server.
+// Serve runs the server on the given listener.
+func (s *Server) Serve(ln net.Listener) error {
+	for {
+		c, err := ln.Accept()
+		if err != nil {
+			return err
+		}
+		go s.handle(c)
+	}
+}
+
+// Run runs the server on TCP.
 func (s *Server) Run() error {
 	if s.Logger == nil {
 		s.Logger = log.Default()
