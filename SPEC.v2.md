@@ -73,8 +73,11 @@ Bit Flags (bits 0 (bottom) - 7 (top))
     - No stream with passed request
   - 5th bit == too large
     - A message sent was too large
+  - 2nd bit == Pong
+  - 1st bit == Ping
+    - The ping/pong flags are useful for making sure the connection is established. Clients are required to make sure the stream is ready to receive on before the server is ready to send messages so it may be useful for servers to send this (and clients to wait for this) before continuing on
   - 0th bit == close
 
 # TODO
-- What to do on timeouts? Close connection?
-- What's sent for various errors (like too long status/flag)?
+- [ ] What to do on timeouts? Close connection?
+- [ ] What's sent for various errors (like too long status/flag)?

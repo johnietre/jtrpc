@@ -1,6 +1,7 @@
 package jtrpc
 
 // TODO: In headers, copy bytes in future bytes methods for Headers?
+// TODO: Req flags (make it easy for users to set)
 
 import (
 	"bytes"
@@ -16,14 +17,13 @@ import (
 const (
 	// FlagStreamMsg signifies a stream message.
 	FlagStreamMsg byte = 0b1000_0000
-
 	// ReqFlagStream signifies a request expects a stream.
-	ReqFlagStream = 0b0100_0000
+	ReqFlagStream byte = 0b0100_0000
 	// ReqFlagTimeout signifies a request has a timeout.
-	ReqFlagTimeout = 0b0000_0010
+	ReqFlagTimeout byte = 0b0000_0010
 	// ReqFlagCancel signifies the request is to cancel a prior request with the
 	// same ID.
-	ReqFlagCancel = 0b0000_0001
+	ReqFlagCancel byte = 0b0000_0001
 )
 
 var (
@@ -454,7 +454,8 @@ func (h *Headers) Range(f func(string, string) bool) {
 type Request struct {
 	id  uint64
 	ctx context.Context
-	// RemoteAddr is the remote address of the client.
+	// RemoteAddr is the remote address of the client. Not set for client
+	// requests (only for server handlers).
 	RemoteAddr string
 	// Flags are the flags that were sent.
 	Flags byte
@@ -464,6 +465,15 @@ type Request struct {
 	Headers *Headers
 	// Body is the request body.
 	Body *bytes.Buffer
+}
+
+// NewRequest creates a new request.
+func NewRequest(ctx context.Context, path string) *Request {
+	return &Request{
+		ctx:     ctx,
+		Path:    path,
+		Headers: NewHeaders(false),
+	}
 }
 
 func newRequest(
@@ -480,6 +490,7 @@ func newRequest(
 }
 
 var (
+	// ErrBodyTooLarge means a body was too large.
 	ErrBodyTooLarge = fmt.Errorf("body too large")
 )
 
@@ -513,6 +524,20 @@ func RequestFromReader(r io.Reader, maxBodyLen int64) (*Request, error) {
 		Headers: newHeaders(utils.CloneSlice(b[pathLen:])),
 		Body:    body,
 	}, nil
+}
+
+// SetStream sets whether the request is requesting a stream.
+func (r *Request) SetStream(b bool) {
+	if b {
+		r.Flags |= ReqFlagStream
+	} else {
+		r.Flags &= ^ReqFlagStream
+	}
+}
+
+// WantsStream returns whether the request is requesting a stream.
+func (r *Request) WantsStream() bool {
+	return hasStreamFlag(r.Flags)
 }
 
 // Clone creates a deep copy of the request with the given context.
@@ -561,6 +586,42 @@ func (r *Request) WithContext(ctx context.Context) *Request {
 func (r *Request) SetContext(ctx context.Context) *Request {
 	r.ctx = ctx
 	return r
+}
+
+// WriteTo writes the request to the given writer, returning how many bytes
+// were written and any errors that occur.
+func (r *Request) WriteTo(w io.Writer) (n int64, err error) {
+	buf := make([]byte, 21)
+	place8(buf, r.id)
+	buf[8] = r.Flags
+	place2(buf[9:], uint16(len(r.Path)))
+	var headerBytes []byte
+	if r.Headers != nil {
+		headerBytes, _ = r.Headers.Encode()
+		place2(buf[11:], uint16(len(headerBytes)))
+	}
+	if r.Body != nil {
+		place8(buf[13:], uint64(r.Body.Len()))
+	}
+	// TODO: Multiple writes
+	buf = append(buf, r.Path...)
+	buf = append(buf, headerBytes...)
+	if n, err = utils.WriteAll(w, buf); err == nil && r.Body != nil {
+		ni := int64(0)
+		ni, err = io.CopyN(w, r.Body, int64(r.Body.Len()))
+		n += ni
+	}
+	return
+}
+
+// SetBodyBytes sets the request body to the given bytes.
+func (r *Request) SetBodyBytes(b []byte) {
+	r.Body = bytes.NewBuffer(b)
+}
+
+// SetBodyString sets the request body to the given string.
+func (r *Request) SetBodyString(s string) {
+	r.Body = bytes.NewBufferString(s)
 }
 
 func hasStreamFlag(flags byte) bool {
@@ -647,6 +708,8 @@ type Response struct {
 	Headers *Headers
 	body    *ReadCloseCounter
 	bodyLen uint64
+	// Stream is the stream that is associated with this response, if applicable.
+	Stream *Stream
 	// Request is the request that is associated with this response. As of right
 	// now, not set for Server request/responses.
 	Request *Request
@@ -699,6 +762,26 @@ func (r *Response) BodyLenLeft() uint64 {
 // how many bytes have already been read from the body reader.
 func (r *Response) BodyLen() uint64 {
 	return r.bodyLen
+}
+
+// BodyBytes attempts to read all the bytes from the body, without closing the
+// body.
+func (r *Response) BodyBytes() ([]byte, error) {
+	if r.body == nil {
+		return nil, nil
+	}
+	b, err := io.ReadAll(r.body)
+	return b, err
+}
+
+// BodyString attempts to read the entire body, returning a string, without
+// closing body.
+func (r *Response) BodyString() (string, error) {
+	b, err := r.BodyBytes()
+	if err != nil {
+		return "", err
+	}
+	return string(b), err
 }
 
 // WriteTo writes the response to the writer. This is called internally when

@@ -1,94 +1,96 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"log"
+	"os"
+	"strings"
 
 	jtrpc "github.com/johnietre/jtrpc/go"
 )
 
 func main() {
-	addr := "127.0.0.1:8080"
-	srvr := jtrpc.NewServer(addr)
-	srvr.Middleware(func(next jtrpc.Handler) jtrpc.Handler {
-		return jtrpc.HandlerFunc(func(req *jtrpc.Request, resp *jtrpc.Response) {
-			fmt.Println("========START MIDDLEWARE========")
-			fmt.Println("PATH:", req.Path)
-			fmt.Println("HEADERS:", req.Headers.Parse())
-			fmt.Println("========START HANDLER========")
-			req = req.SetContext(
-				context.WithValue(req.Context(), "another key", "another value"),
-			)
-			req = req.WithContext(
-				context.WithValue(req.Context(), "some key", "some value"),
-			)
-			next.Handle(req, resp)
-			fmt.Println("========END HANDLER========")
-			fmt.Println("========END MIDDLEWARE========")
-		})
-	})
-	srvr.HandleFunc("/yes", yesHandler)
-	srvr.HandleFunc("/no", noHandler)
-	srvr.HandleFunc("/echo", echoHandler)
-	srvr.HandleStreamFunc(
-		"/stream",
-		streamHandler,
-		func(next jtrpc.Handler) jtrpc.Handler {
-			return jtrpc.HandlerFunc(func(req *jtrpc.Request, resp *jtrpc.Response) {
-				fmt.Println("STREAM:", req.Path)
-				next.Handle(req, resp)
-			})
-		},
-	)
-	log.Print("Running on ", addr)
-	panic(srvr.Run())
-}
+	log.SetFlags(log.Lshortfile)
+	client, err := jtrpc.Dial("127.0.0.1:8080")
+	if err != nil {
+		log.Fatal(err)
+	}
 
-func yesHandler(req *jtrpc.Request, resp *jtrpc.Response) {
-	fmt.Printf("Headers: %+v\n", req.Headers.Parse())
-	fmt.Println("Body:", req.Body.String())
-}
+	req := jtrpc.NewRequest(context.Background(), "/echo")
+	req.SetBodyString("no and yes")
+	req.Headers.Set("h1", "value1")
+	req.Headers.Set("h2", "value2")
+	req.Headers.Set("h3579", "value3579")
+	resp := <-must(client.Send(req)).Chan()
+	resp.Headers.Parse()
+	fmt.Println("Response:", resp)
+	fmt.Println("Body:", must(resp.BodyString()))
+	fmt.Println()
 
-func noHandler(req *jtrpc.Request, resp *jtrpc.Response) {
-	resp.StatusCode = jtrpc.StatusBadRequest
-	resp.SetBodyString("no good dog")
-}
+	req = jtrpc.NewRequest(context.Background(), "/yes")
+	req.SetBodyString("no and yes")
+	resp = <-must(client.Send(req)).Chan()
+	resp.Headers.Parse()
+	fmt.Println("Response:", resp)
+	fmt.Println("Body:", must(resp.BodyString()))
+	fmt.Println()
 
-func echoHandler(req *jtrpc.Request, resp *jtrpc.Response) {
-	resp.Headers = req.Headers
-	resp.SetBodyReader(req.Body, int64(req.Body.Len()))
-}
+	req = jtrpc.NewRequest(context.Background(), "/yes")
+	resp = <-must(client.Send(req)).Chan()
+	resp.Headers.Parse()
+	fmt.Println("Response:", resp)
+	fmt.Println("Body:", must(resp.BodyString()))
+	fmt.Println()
 
-func streamHandler(stream *jtrpc.Stream) {
+	req = jtrpc.NewRequest(context.Background(), "/no")
+	req.SetBodyString("no and yes")
+	resp = <-must(client.Send(req)).Chan()
+	resp.Headers.Parse()
+	fmt.Println("Response:", resp)
+	fmt.Println("Body:", must(resp.BodyString()))
+	fmt.Println()
+
+	req = jtrpc.NewRequest(context.Background(), "/stream")
+	req.SetStream(true)
+	req.Headers.Set("stream_header1", "value1")
+	req.Headers.Set("stream_header2", "value2")
+	req.Headers.Set("stream_header3579", "value3579")
+	resp = <-must(client.Send(req)).Chan()
+	resp.Headers.Parse()
+	fmt.Println("Response:", resp)
+	fmt.Println("Body:", must(resp.BodyString()))
+	stream := resp.Stream
+	if stream == nil {
+		panic("got nil stream")
+	}
 	defer stream.Close()
-	fmt.Println("Context Value:", stream.Request().Context().Value("some key"))
-	fmt.Println("Context Value:", stream.Request().Context().Value("another key"))
 	for {
-		msg, err := stream.Recv()
-		if err != nil {
-			if sce := jtrpc.GetStreamClosedError(err); sce != nil {
-				log.Println("Stream closed error:", err)
-			} else {
-				log.Println("Other error:", err)
-			}
+		line := readline("Message: ")
+		if line == "exit" {
 			break
 		}
-		fmt.Println("Incoming message Body:", msg.BodyString())
-		newMsg := jtrpc.Message{}
-		newMsg.SetBodyBytes(reverse(msg.BodyBytes()))
-		fmt.Println("Outgoing message Body:", newMsg.BodyString())
-		if err := stream.Send(newMsg); err != nil {
-			log.Println(err)
-			break
+		if err := stream.Send(jtrpc.NewMessage([]byte(line))); err != nil {
+			log.Fatal(err)
 		}
+		msg := must(stream.Recv())
+		fmt.Println("Received:", msg.BodyString())
 	}
-	fmt.Println("Closed")
 }
 
-func reverse(b []byte) []byte {
-	for i := range b[:len(b)/2] {
-		b[i], b[len(b)-i-1] = b[len(b)-i-1], b[i]
+var stdinReader = bufio.NewReader(os.Stdin)
+
+func readline(prompt ...string) string {
+	if len(prompt) != 0 {
+		fmt.Print(prompt[0])
 	}
-	return b
+	return strings.TrimSpace(must(stdinReader.ReadString('\n')))
+}
+
+func must[T any](t T, err error) T {
+	if err != nil {
+		log.Fatal(err)
+	}
+	return t
 }

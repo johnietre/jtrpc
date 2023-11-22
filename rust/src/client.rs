@@ -77,7 +77,7 @@ pub(crate) struct InnerClient<W: WriteUnpin + 'static> {
 }
 
 impl<W: WriteUnpin + 'static> InnerClient<W> {
-    pub async fn with_rw(
+    async fn with_rw(
         mut reader: (impl ReadUnpin + 'static),
         mut writer: W,
     ) -> Result<Arc<Self>, JtRPCError> {

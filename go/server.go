@@ -151,15 +151,15 @@ func (s *Server) Run() error {
 
 type serverConn struct {
 	net.Conn
-	reqs    *utils.Mutex[map[uint64]*Request]
-	streams *utils.Mutex[map[uint64]*Stream]
+	reqs    *utils.RWMutex[map[uint64]*Request]
+	streams *utils.RWMutex[map[uint64]*Stream]
 }
 
 func newServerConn(conn net.Conn) *serverConn {
 	return &serverConn{
 		Conn:    conn,
-		reqs:    utils.NewMutex(make(map[uint64]*Request)),
-		streams: utils.NewMutex(make(map[uint64]*Stream)),
+		reqs:    utils.NewRWMutex(make(map[uint64]*Request)),
+		streams: utils.NewRWMutex(make(map[uint64]*Stream)),
 	}
 }
 
@@ -371,7 +371,7 @@ func (s *Server) handleReq(
 				s.bufPool.Put(req.Body)
 				// Handle stream
 				if resp.StatusCode == StatusOK && err == nil {
-					stream := newStream(lw, conn, req)
+					stream := newStream(lw, conn.streams, req)
 					conn.streams.Apply(func(mp *map[uint64]*Stream) {
 						(*mp)[stream.req.id] = stream
 					})
@@ -563,7 +563,7 @@ func (s *Server) wsStreamHandler(
 		if resp.StatusCode == StatusOK && err == nil {
 			sconn := newServerConn(ws)
 			lw := utils.NewLockedWriter(sconn)
-			stream := newStream(lw, sconn, req)
+			stream := newStream(lw, sconn.streams, req)
 			streamHandler.HandleStream(stream)
 		}
 	}).ServeHTTP(w, r)

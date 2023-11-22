@@ -22,6 +22,10 @@ const (
 	MsgFlagClose = 0b0000_0001
 )
 
+func hasMsgFlagClose(flags byte) bool {
+	return flags&MsgFlagClose != 0
+}
+
 var (
 	// ErrTimedOut means an operation timed out.
 	ErrTimedOut = fmt.Errorf("timed out")
@@ -30,7 +34,7 @@ var (
 // Stream represents a stream.
 type Stream struct {
 	lw           *utils.LockedWriter
-	conn         *serverConn
+	streamsMtx   *utils.RWMutex[map[uint64]*Stream]
 	req          *Request
 	msgChan      chan Message
 	msgBuffer    *list.List
@@ -41,12 +45,13 @@ type Stream struct {
 }
 
 func newStream(
-	lw *utils.LockedWriter, conn *serverConn, req *Request,
+	lw *utils.LockedWriter,
+	streamsMtx *utils.RWMutex[map[uint64]*Stream], req *Request,
 ) *Stream {
 	stream := &Stream{
-		lw:   lw,
-		conn: conn,
-		req:  req,
+		lw:         lw,
+		streamsMtx: streamsMtx,
+		req:        req,
 		// TODO: Chan len
 		msgChan:   make(chan Message, 50),
 		msgBuffer: list.New(),
@@ -208,7 +213,7 @@ func (s *Stream) closeWithMessage(send bool, msg, msgRecvd Message) error {
 		return s.GetClosedErr()
 	}
 	close(s.msgChan)
-	s.conn.streams.Apply(func(mp *map[uint64]*Stream) {
+	s.streamsMtx.Apply(func(mp *map[uint64]*Stream) {
 		delete(*mp, s.req.id)
 	})
 	if !send {
@@ -317,6 +322,7 @@ type StreamClosedError struct {
 	ClientClosed bool
 }
 
+// Error implements the error.Error interface method.
 func (sce *StreamClosedError) Error() string {
 	var l int
 	if sce.Message.Body != nil {
