@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+  "flag"
 	"fmt"
 	"log"
 
@@ -10,6 +11,9 @@ import (
 
 func main() {
 	addr := "127.0.0.1:8080"
+  flag.StringVar(&addr, "addr", "127.0.0.1:8080", "Address to run on")
+  flag.Parse()
+
 	srvr := jtrpc.NewServer(addr)
 	srvr.Middleware(func(next jtrpc.Handler) jtrpc.Handler {
 		return jtrpc.HandlerFunc(func(req *jtrpc.Request, resp *jtrpc.Response) {

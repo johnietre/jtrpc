@@ -180,7 +180,8 @@ func (c *Client) Send(req *Request) (rc RespChan, err error) {
 	req.WriteTo(writer)
 	c.lw.Unlock()
 	if err != nil {
-		return
+    err = c.closeWithErr(err)
+    return
 	}
 	rc = newRespChan(req)
 	c.reqs.Apply(func(mp *map[uint64]RespChan) {

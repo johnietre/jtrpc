@@ -111,17 +111,6 @@ func (s *Server) HandleStreamFunc(
 
 // Serve runs the server on the given listener.
 func (s *Server) Serve(ln net.Listener) error {
-	for {
-		c, err := ln.Accept()
-		if err != nil {
-			return err
-		}
-		go s.handle(c)
-	}
-}
-
-// Run runs the server on TCP.
-func (s *Server) Run() error {
 	if s.Logger == nil {
 		s.Logger = log.Default()
 	}
@@ -135,11 +124,6 @@ func (s *Server) Run() error {
 	} else if s.MaxStreamBodyLen < 0 {
 		s.MaxStreamBodyLen = 1<<63 - 1
 	}
-
-	ln, err := net.Listen("tcp", s.Addr)
-	if err != nil {
-		return err
-	}
 	for {
 		c, err := ln.Accept()
 		if err != nil {
@@ -147,6 +131,19 @@ func (s *Server) Run() error {
 		}
 		go s.handle(c)
 	}
+}
+
+// Run runs the server on TCP.
+func (s *Server) Run() error {
+  if s.Mux == nil {
+    // TODO
+  }
+
+	ln, err := net.Listen("tcp", s.Addr)
+	if err != nil {
+		return err
+	}
+  return s.Serve(ln)
 }
 
 type serverConn struct {

@@ -855,6 +855,20 @@ func (r *Response) ReadFrom(reader io.Reader) (nr int64, err error) {
 	return
 }
 
+// ShallowCopyFrom shallow copies the passed response into the calling object.
+// This means it copies things like the response status code and flags and only
+// changes things like the headers and body to point to those of the passed
+// response. Any associated request data is not changed. This is mainly useful
+// for proxying responses.
+func (r *Response) ShallowCopyFrom(resp *Response) {
+  r.flags = resp.flags
+  r.StatusCode = resp.StatusCode
+  r.Headers = resp.Headers
+  r.body = resp.body
+  r.bodyLen = resp.bodyLen
+  r.Stream = resp.Stream
+}
+
 // TODO: Flags
 func writeResp(
 	lw *utils.LockedWriter, reqId uint64, statusCode byte,
