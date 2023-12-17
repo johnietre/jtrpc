@@ -189,12 +189,6 @@ func (m *Mux) streamMiddleware(next jtrpc.Handler) jtrpc.Handler {
 }
 
 func (m *Mux) adminHandler(req *jtrpc.Request, resp *jtrpc.Response) {
-	pwd, ok := req.Headers.GetChecked("password")
-	if !ok || pwd != config.Password {
-		resp.StatusCode = jtrpc.StatusUnauthorized
-		resp.SetBodyString("invalid credentials")
-		return
-	}
 	info, ok := req.Context().Value(ctxKey).(MiddlewareInfo)
 	if !ok {
 		logger.Print("expected info from middleware")
@@ -202,9 +196,19 @@ func (m *Mux) adminHandler(req *jtrpc.Request, resp *jtrpc.Response) {
 		return
 	}
 	rest := info.rest
+	pwd, ok := req.Headers.GetChecked("password")
+	if !ok || pwd != config.Password {
+		if rest == "/servers" {
+			m.getServersHandler(req, resp, false)
+			return
+		}
+		resp.StatusCode = jtrpc.StatusUnauthorized
+		resp.SetBodyString("invalid credentials")
+		return
+	}
 	switch rest {
 	case "/servers":
-		m.getServersHandler(req, resp)
+		m.getServersHandler(req, resp, true)
 	case "/servers/new":
 		m.newServersHandler(req, resp)
 	case "/servers/del":
@@ -214,11 +218,13 @@ func (m *Mux) adminHandler(req *jtrpc.Request, resp *jtrpc.Response) {
 	}
 }
 
-func (m *Mux) getServersHandler(req *jtrpc.Request, resp *jtrpc.Response) {
+func (m *Mux) getServersHandler(
+	req *jtrpc.Request, resp *jtrpc.Response, authed bool,
+) {
 	var servers map[string]*Server
 	m.servers.RApply(func(mp *map[string]*Server) {
 		for path, srvr := range *mp {
-			if !srvr.Hidden {
+			if authed || !srvr.Hidden {
 				servers[path] = srvr
 			}
 		}

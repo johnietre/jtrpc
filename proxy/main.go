@@ -6,7 +6,7 @@ import (
 )
 
 var (
-	logger = log.Default()
+	logger = log.New(os.Stderr, "", 0)
 )
 
 func main() {
