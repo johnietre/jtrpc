@@ -191,10 +191,6 @@ func (h *Headers) Parse() map[string]string {
 		if kvl > l {
 			break
 		}
-		if kvl > len(h.bytes) {
-			// TODO: Do something?
-			break
-		}
 		m[string(h.bytes[:kl])] = string(h.bytes[kl:kvl])
 		h.bytes = h.bytes[kvl:]
 		l -= kvl
@@ -343,8 +339,8 @@ func (h *Headers) Set(key, value string) bool {
 		return false
 	}
 	buf := make([]byte, 4)
-	utils.Place2(buf, uint16(kl))
-	utils.Place2(buf[2:], uint16(vl))
+	place2(buf, uint16(kl))
+	place2(buf[2:], uint16(vl))
 	buf = append(buf, key...)
 	buf = append(buf, value...)
 	h.bytes = append(h.bytes, buf...)
@@ -640,6 +636,8 @@ const (
 	/* Non-Errors */
 	// StatusOK is an OK status code.
 	StatusOK byte = 0
+	// StatusPartialError is a PartialError status code.
+	StatusPartialError byte = 1
 
 	/* Client Errors */
 
@@ -726,7 +724,8 @@ func newResponse(reqId uint64, flags byte, req *Request) *Response {
 
 // SetBodyString sets the body to the specified string.
 func (r *Response) SetBodyString(s string) {
-	r.SetBodyBytes([]byte(s))
+	sr := strings.NewReader(s)
+	r.SetBodyReader(sr, sr.Size())
 }
 
 // SetBodyBytes sets the body to the specified bytes.
@@ -736,7 +735,8 @@ func (r *Response) SetBodyBytes(b []byte) {
 }
 
 // SetBodyReader sets the body to the given reader.
-// Takes a io.Reader and the number of bytes to read.
+// Takes a io.Reader and the number of bytes to read. If the reader is an
+// io.ReadCloser, this is the same as calling Response.SetBodyReadCloser.
 func (r *Response) SetBodyReader(ir io.Reader, l int64) {
 	r.SetBodyReadCloser(wrapCloser(ir), l)
 }
@@ -861,12 +861,30 @@ func (r *Response) ReadFrom(reader io.Reader) (nr int64, err error) {
 // response. Any associated request data is not changed. This is mainly useful
 // for proxying responses.
 func (r *Response) ShallowCopyFrom(resp *Response) {
-  r.flags = resp.flags
-  r.StatusCode = resp.StatusCode
-  r.Headers = resp.Headers
-  r.body = resp.body
-  r.bodyLen = resp.bodyLen
-  r.Stream = resp.Stream
+	r.flags = resp.flags
+	r.StatusCode = resp.StatusCode
+	r.Headers = resp.Headers
+	r.body = resp.body
+	r.bodyLen = resp.bodyLen
+	r.Stream = resp.Stream
+}
+
+// SetStatusBodyBytes sets the status and body of the response.
+func (r *Response) SetStatusBodyBytes(status byte, body []byte) {
+	r.StatusCode = status
+	r.SetBodyBytes(body)
+}
+
+// SetStatusBodyString sets the status and body of the response.
+func (r *Response) SetStatusBodyString(status byte, body string) {
+	r.StatusCode = status
+	r.SetBodyString(body)
+}
+
+// SetStatusBodyReader sets the status and body of the response.
+func (r *Response) SetStatusBodyReader(status byte, ir io.Reader, l int64) {
+	r.StatusCode = status
+	r.SetBodyReader(ir, l)
 }
 
 // TODO: Flags
@@ -931,6 +949,9 @@ func (CloserWrapper) Close() error {
 }
 
 func wrapCloser(r io.Reader) io.ReadCloser {
+	if rc, ok := r.(io.ReadCloser); ok {
+		return rc
+	}
 	return CloserWrapper{Reader: r}
 }
 

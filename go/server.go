@@ -90,11 +90,6 @@ func (s *Server) HandleStream(path string, h StreamHandler, ms ...Middleware) {
 	s.Mux.HandleStream(path, h, ms...)
 }
 
-// Middleware adds middleware to the Mux.
-func (s *Server) Middleware(ms ...Middleware) {
-	s.Mux.Middleware(ms...)
-}
-
 // HandleFunc adds a HandlerFunc to the Mux.
 func (s *Server) HandleFunc(
 	path string, h func(*Request, *Response), ms ...Middleware,
@@ -107,6 +102,21 @@ func (s *Server) HandleStreamFunc(
 	path string, h func(*Stream), ms ...Middleware,
 ) {
 	s.Mux.HandleStream(path, StreamHandlerFunc(h), ms...)
+}
+
+// GlobalMiddleware adds "global" middleware to the Mux.
+func (s *Server) GlobalMiddleware(ms ...Middleware) {
+	s.Mux.GlobalMiddleware(ms...)
+}
+
+// Middleware adds middleware to the Mux.
+func (s *Server) Middleware(ms ...Middleware) {
+	s.Mux.Middleware(ms...)
+}
+
+// StreamMiddleware adds "global" middleware to the Mux.
+func (s *Server) StreamMiddleware(ms ...Middleware) {
+	s.Mux.StreamMiddleware(ms...)
 }
 
 // Serve runs the server on the given listener.
@@ -135,15 +145,15 @@ func (s *Server) Serve(ln net.Listener) error {
 
 // Run runs the server on TCP.
 func (s *Server) Run() error {
-  if s.Mux == nil {
-    // TODO
-  }
+	if s.Mux == nil {
+		// TODO
+	}
 
 	ln, err := net.Listen("tcp", s.Addr)
 	if err != nil {
 		return err
 	}
-  return s.Serve(ln)
+	return s.Serve(ln)
 }
 
 type serverConn struct {
@@ -347,11 +357,14 @@ func (s *Server) handleReq(
 			resp := newResponse(id, flags, req)
 			handler := noopHandler
 			// Add middlewares
-			if mw := s.Mux.GetMiddleware(); mw != nil {
-				// Pass a handler that does nothing just so that middleware can be run
+			if mw := s.Mux.GetStreamMiddlewareFor(path); mw != nil {
 				handler = mw(handler)
 			}
-			if mw := s.Mux.GetStreamMiddleware(path); mw != nil {
+			if mw := s.Mux.GetStreamMiddleware(); mw != nil {
+				handler = mw(handler)
+			}
+			if mw := s.Mux.GetGlobalMiddleware(); mw != nil {
+				// Pass a handler that does nothing just so that middleware can be run
 				handler = mw(handler)
 			}
 			// Run the and add the stream if necessary
@@ -415,7 +428,13 @@ func (s *Server) handleReq(
 	// TODO: Flags
 	resp := newResponse(id, 0, req)
 	// Pass to middleware and get new handler
+	if mw := s.Mux.GetMiddlewareFor(path); mw != nil {
+		handler = mw(handler)
+	}
 	if mw := s.Mux.GetMiddleware(); mw != nil {
+		handler = mw(handler)
+	}
+	if mw := s.Mux.GetGlobalMiddleware(); mw != nil {
 		handler = mw(handler)
 	}
 	go func() {
@@ -490,7 +509,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		handler = s.Mux.GetHandler(path)
 	}
 	if handler != nil {
+		if mw := s.Mux.GetMiddlewareFor(path); mw != nil {
+			handler = mw(handler)
+		}
 		if mw := s.Mux.GetMiddleware(); mw != nil {
+			handler = mw(handler)
+		}
+		if mw := s.Mux.GetGlobalMiddleware(); mw != nil {
 			handler = mw(handler)
 		}
 		req := makeReq(path)
@@ -547,10 +572,13 @@ func (s *Server) wsStreamHandler(
 		}
 		resp := newResponse(req.id, req.Flags, req)
 		handler := noopHandler
-		if mw := s.Mux.GetMiddleware(); mw != nil {
+		if mw := s.Mux.GetStreamMiddlewareFor(path); mw != nil {
 			handler = mw(handler)
 		}
-		if mw := s.Mux.GetStreamMiddleware(path); mw != nil {
+		if mw := s.Mux.GetStreamMiddleware(); mw != nil {
+			handler = mw(handler)
+		}
+		if mw := s.Mux.GetGlobalMiddleware(); mw != nil {
 			handler = mw(handler)
 		}
 		// Run the and add the stream if necessary

@@ -100,7 +100,7 @@ func (s *Stream) Send(msg Message) error {
 }
 
 func (s *Stream) send(msg Message) error {
-	// TODO: Handle error
+	// TODO: Handle error (and close stream?)
 	msg.reqId = s.req.id
 	_, err := msg.WriteTo(s.lw.LockWriter())
 	s.lw.Unlock()

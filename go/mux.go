@@ -42,33 +42,73 @@ type Mux interface {
 	// Handle is used to handle a regular request.
 	Handle(string, Handler, ...Middleware)
 	// HandleStream is used to handle streams. Middleware that takes regular
-	// a request/response is passed since streams start as request/response. The
-	// middleware here are used to modify the request/response for a stream path.
-	// Only a response with an OK status allows the stream to be created. ANY
-	// other status results in the stream not being created. This is checked
-	// after ALL middleware has been run (has returned).
+	// a request/response is passed since streams start as request/response.
+	// See Mux.StreamMiddleware for more info on middleware behavior here.
 	HandleStream(string, StreamHandler, ...Middleware)
-	// Middleware adds "global" middleware to the Mux (middleware called for all
-	// requests, both regular and stream setup). This is called before any other
-	// middlewares.
+
+	// GlobalMiddleware adds "global" middleware to the Mux (middleware called
+	// for all requests, both regular and stream setup). This is called before
+	// any other middlewares.
+	GlobalMiddleware(...Middleware)
+	// Middleware adds middleware that is run before all non-stream handlers and
+	// handler-specific middleware.
 	Middleware(...Middleware)
+	// StreamMiddleware adds middleware that is run before a stream is created.
+	// The stream middleware are used to modify the request/response for a stream
+	// path. Only a response with an OK status allows the stream to be created.
+	// ANY other status results in the stream not being created. This is checked
+	// after ALL middleware has been run (has returned). This is called before
+	// any handler-specific middleware.
+	StreamMiddleware(...Middleware)
+
 	// GetHandler gets the handler for the given path.
 	GetHandler(string) Handler
-	// GetHandler gets the stream handler for the given path.
+	// GetMiddlewareFor gets the middleware for a given path.
+	GetMiddlewareFor(string) Middleware
+
+	// GetStreamHandler gets the stream handler for the given path.
 	GetStreamHandler(string) StreamHandler
-	// GetStreamMiddleware gets the stream handler middleware for the given path.
-	GetStreamMiddleware(string) Middleware
-	// GetMiddleware returns the middleware mux's function.
+	// GetStreamMiddlewareFor gets the stream handler middleware for the given
+	// path.
+	GetStreamMiddlewareFor(string) Middleware
+
+	// GetGlobalMiddleware returns the mux's "global" middleware.
+	GetGlobalMiddleware() Middleware
+	// GetMiddleware returns the middleware run before all non-stream handlers.
 	GetMiddleware() Middleware
+	// GetStreamMiddleware returns the middleware run before any stream is
+	// created.
+	GetStreamMiddleware() Middleware
 }
+
+// UnimplementedMux implements the Mux interface and may be useful for
+// embedding.
+type UnimplementedMux struct{}
+
+func (UnimplementedMux) Handle(string, Handler, ...Middleware)             {}
+func (UnimplementedMux) HandleStream(string, StreamHandler, ...Middleware) {}
+func (UnimplementedMux) GlobalMiddleware(...Middleware)                    {}
+func (UnimplementedMux) Middleware(...Middleware)                          {}
+func (UnimplementedMux) StreamMiddleware(...Middleware)                    {}
+func (UnimplementedMux) GetHandler(string) Handler                         { return nil }
+func (UnimplementedMux) GetMiddlewareFor(string) Handler                   { return nil }
+func (UnimplementedMux) GetStreamHandler(string) StreamHandler             { return nil }
+func (UnimplementedMux) GetStreamMiddlewareFor(string) Middleware          { return nil }
+func (UnimplementedMux) GetGlobalMiddleware() Middleware                   { return nil }
+func (UnimplementedMux) GetMiddleware() Middleware                         { return nil }
+func (UnimplementedMux) GetStreamMiddleware() Middleware                   { return nil }
 
 // MapMux is the defualt multiplexer used by the server. If a path already
 // exists, it will be silently replaced. Middleware passed to the Handle*
 // functions is run in the order it was passed. Middleware added "globally" is
 // run first, in a similar fashion.
 type MapMux struct {
-	middleware        Middleware
+	globalMiddleware Middleware
+	middleware       Middleware
+	streamMiddleware Middleware
+
 	handlers          map[string]Handler
+	middlewares       map[string]Middleware
 	streamMiddlewares map[string]Middleware
 	streamHandlers    map[string]StreamHandler
 }
@@ -77,50 +117,60 @@ type MapMux struct {
 func NewMapMux() *MapMux {
 	return &MapMux{
 		handlers:          make(map[string]Handler),
+		middlewares:       make(map[string]Middleware),
 		streamMiddlewares: make(map[string]Middleware),
 		streamHandlers:    make(map[string]StreamHandler),
 	}
 }
 
-// Handle implements the Mux.Handle.
+// Handle implements the Mux.Handle function.
 func (mm *MapMux) Handle(path string, h Handler, ms ...Middleware) {
-	// Wrap the handler/middlewares.
-	if l := len(ms); l != 0 {
-		for i := l - 1; i >= 0; i-- {
-			h = ms[i](h)
-		}
+	if len(ms) != 0 {
+		m, ms := ms[0], ms[1:]
+		mm.middlewares[path] = CombineMiddleware(m, ms...)
 	}
 	mm.handlers[path] = h
 }
 
 // HandleStream implements the Mux.HandleStream function.
 func (mm *MapMux) HandleStream(path string, h StreamHandler, ms ...Middleware) {
-	// Wrap the handler/middlewares.
 	if len(ms) != 0 {
-		m := ms[0]
-		for _, mid := range ms[1:] {
-			om, mw := m, mid
-			m = func(next Handler) Handler {
-				return om(mw(next))
-			}
-		}
-		mm.streamMiddlewares[path] = m
+		m, ms := ms[0], ms[1:]
+		mm.streamMiddlewares[path] = CombineMiddleware(m, ms...)
 	}
 	mm.streamHandlers[path] = h
 }
 
-// HandleFunc is an alias for Handle(path, HandlerFunc(f)) function.
+// HandleFunc is an alias for Handle(path, HandlerFunc(f), ms...).
 func (mm *MapMux) HandleFunc(
 	path string, f func(*Request, *Response), ms ...Middleware,
 ) {
-	mm.handlers[path] = HandlerFunc(f)
+	mm.Handle(path, HandlerFunc(f), ms...)
 }
 
-// HandleStreamFunc is an alias for HandleStream(path, StreamHandlerFunc(f)).
+// HandleStreamFunc is an alias for
+// HandleStream(path, StreamHandlerFunc(f), ms...).
 func (mm *MapMux) HandleStreamFunc(
 	path string, f func(*Stream), ms ...Middleware,
 ) {
-	mm.streamHandlers[path] = StreamHandlerFunc(f)
+	mm.HandleStream(path, StreamHandlerFunc(f), ms...)
+}
+
+// GlobalMiddleware implements the Mux.GlobalMiddleware function. This adds
+// middleware each time it is called, never replacing the middleware.
+func (mm *MapMux) GlobalMiddleware(ms ...Middleware) {
+	if len(ms) == 0 {
+		return
+	}
+	if mm.globalMiddleware == nil {
+		mm.globalMiddleware, ms = ms[0], ms[1:]
+	}
+	mm.globalMiddleware = CombineMiddleware(mm.globalMiddleware, ms...)
+}
+
+// SetGlobalMiddleware sets the mux's global middleware.
+func (mm *MapMux) SetGlobalMiddleware(m Middleware) {
+	mm.globalMiddleware = m
 }
 
 // Middleware implements the Mux.Middleware function. This adds middleware each
@@ -129,16 +179,32 @@ func (mm *MapMux) Middleware(ms ...Middleware) {
 	if len(ms) == 0 {
 		return
 	}
-	// TODO: Test
 	if mm.middleware == nil {
 		mm.middleware, ms = ms[0], ms[1:]
 	}
-	for _, mid := range ms {
-		om, mw := mm.middleware, mid
-		mm.middleware = func(next Handler) Handler {
-			return om(mw(next))
-		}
+	mm.middleware = CombineMiddleware(mm.middleware, ms...)
+}
+
+// SetMiddleware sets the mux's middleware.
+func (mm *MapMux) SetMiddleware(m Middleware) {
+	mm.middleware = m
+}
+
+// StreamMiddleware implements the Mux.StreamMiddleware function. This adds
+// middleware each time it is called, never replacing the middleware.
+func (mm *MapMux) StreamMiddleware(ms ...Middleware) {
+	if len(ms) == 0 {
+		return
 	}
+	if mm.streamMiddleware == nil {
+		mm.streamMiddleware, ms = ms[0], ms[1:]
+	}
+	mm.streamMiddleware = CombineMiddleware(mm.streamMiddleware, ms...)
+}
+
+// SetStreamMiddleware sets the mux's middleware.
+func (mm *MapMux) SetStreamMiddleware(m Middleware) {
+	mm.streamMiddleware = m
 }
 
 // GetHandler implements the Mux.GetHandler function.
@@ -146,17 +212,47 @@ func (mm *MapMux) GetHandler(path string) Handler {
 	return mm.handlers[path]
 }
 
+// GetMiddlewareFor implements the Mux.GetMiddlewareFor function.
+func (mm *MapMux) GetMiddlewareFor(path string) Middleware {
+	return mm.middlewares[path]
+}
+
 // GetStreamHandler implements the Mux.GetStreamHandler function.
 func (mm *MapMux) GetStreamHandler(path string) StreamHandler {
 	return mm.streamHandlers[path]
 }
 
-// GetStreamMiddleware implements the Mux.GetStreamMiddleware function.
-func (mm *MapMux) GetStreamMiddleware(path string) Middleware {
+// GetStreamMiddlewareFor implements the Mux.GetStreamMiddlewareFor function.
+func (mm *MapMux) GetStreamMiddlewareFor(path string) Middleware {
 	return mm.streamMiddlewares[path]
+}
+
+// GetGlobalMiddleware implements the Mux.GetGlobalMiddleware function.
+func (mm *MapMux) GetGlobalMiddleware() Middleware {
+	return mm.globalMiddleware
 }
 
 // GetMiddleware implements the Mux.GetMiddleware function.
 func (mm *MapMux) GetMiddleware() Middleware {
 	return mm.middleware
+}
+
+// GetStreamMiddleware implements the Mux.GetStreamMiddleware function.
+func (mm *MapMux) GetStreamMiddleware() Middleware {
+	return mm.streamMiddleware
+}
+
+// CombineMiddleware combines multiple middlewares into one.
+func CombineMiddleware(m Middleware, ms ...Middleware) Middleware {
+	// TODO: Test
+	if len(ms) == 0 {
+		return m
+	}
+	for _, mid := range ms {
+		om, mw := m, mid
+		m = func(next Handler) Handler {
+			return om(mw(next))
+		}
+	}
+	return m
 }
