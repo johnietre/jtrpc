@@ -1,0 +1,10 @@
+{
+  "/tunnel": {
+    "name": "Tunneled",
+    "addr": "tunnel"
+  },
+  "/tunnel2": {
+    "name": "Tunneled",
+    "addr": "tunnel"
+  }
+}

@@ -1,0 +1,7 @@
+2023/12/08 18:13:48 Running on 127.0.0.1:8083
+panic: listen tcp 127.0.0.1:8083: bind: address already in use
+
+goroutine 1 [running]:
+main.main()
+	/mnt/c/Users/johni/Desktop/Programming/github.com/johnietre/jtrpc/tests/server.go:49 +0x3ae
+exit status 2

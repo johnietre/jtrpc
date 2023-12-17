@@ -1,0 +1,21 @@
+{
+  "addr": "127.0.0.1:8080",
+  "servers": {
+    "/echo": {
+      "name": "Server-Echo",
+      "addr": "127.0.0.1:8082"
+    },
+    "/yes": {
+      "name": "Server-Yes",
+      "addr": "127.0.0.1:8083"
+    },
+    "/no": {
+      "name": "Server-No",
+      "addr": "127.0.0.1:8084"
+    },
+    "/stream": {
+      "name": "Server-Stream",
+      "addr": "127.0.0.1:8084"
+    }
+  }
+}
