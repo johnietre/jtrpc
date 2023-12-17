@@ -39,6 +39,7 @@ Status Codes
 0 - 127 == non-error, 128 - 255 == error
 Non-Errors
 - 0 == OK
+- 1 == Partial error (not a total failure, but something wrong still happened)
 Client Errors
 - 128 == Not found
 - 129 == Is stream (the path requested is a stream but stream not requested)
