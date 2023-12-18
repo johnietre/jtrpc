@@ -13,6 +13,8 @@ use tokio::time as ttime;
 #[derive(Debug)]
 pub struct Stream<W: WriteUnpin + 'static>(Arc<InnerStream<W>>);
 
+pub type OWHStream = Stream<tokio::net::tcp::OwnedWriteHalf>;
+
 impl<W: WriteUnpin + 'static> Stream<W> {
     pub(crate) fn new(client: Client<W>, req: Request, rx: UnboundedReceiver<Message>) -> Self {
         Self(Arc::new(InnerStream {

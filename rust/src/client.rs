@@ -26,7 +26,9 @@ const INITIAL_BYTES_VER: &[u8] = &[
 #[derive(Debug)]
 pub struct Client<W: WriteUnpin + 'static>(pub(crate) Arc<InnerClient<W>>);
 
-impl Client<OwnedWriteHalf> {
+pub type OWHClient = Client<OwnedWriteHalf>;
+
+impl OWHClient {
     pub async fn connect<A: ToSocketAddrs>(addr: A) -> Result<Self, JtRPCError> {
         let addr = addr.to_socket_addrs()?.next().unwrap();
         let conn = TcpStream::connect(addr).await?;
@@ -83,7 +85,7 @@ impl<W: WriteUnpin + 'static> InnerClient<W> {
     ) -> Result<Arc<Self>, JtRPCError> {
         writer.write_all(INITIAL_BYTES_VER).await?;
         let resp = Response::<W>::read_from(&mut reader).await?;
-        if resp.status_code != crate::status::STATUS_OK {
+        if resp.status_code != crate::Status::OK {
             return Err(resp.into());
         }
         let client = Arc::new(Self {
@@ -139,7 +141,7 @@ impl<W: WriteUnpin + 'static> InnerClient<W> {
 
         reader.read_exact(&mut buf[..11]).await?;
         let status_code = buf[0];
-        let has_stream = status_code == crate::status::STATUS_OK && has_stream_flag(flags);
+        let has_stream = status_code == crate::Status::OK && has_stream_flag(flags);
 
         // Get the headers and body length
         let hl = get2(&buf[1..]) as usize;
